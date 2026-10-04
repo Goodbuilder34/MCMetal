@@ -19,7 +19,7 @@ A native **Metal** rendering backend for Minecraft on Apple Silicon Macs, as a F
 ## Install
 
 1. Install Fabric Loader for Minecraft 26.3.
-2. Download `mcmetal-0.1.3.jar` from [Releases](../../releases) and put it in your `mods` folder.
+2. Download `mcmetal-0.1.4.jar` from [Releases](../../releases) and put it in your `mods` folder.
 3. Launch the game. Metal is used automatically on supported Macs.
 
 ### Shaderpacks

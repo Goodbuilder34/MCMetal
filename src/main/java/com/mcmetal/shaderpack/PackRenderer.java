@@ -586,6 +586,8 @@ public final class PackRenderer implements PackHooks {
 			encoder.suspendRenderPass();
 		}
 		this.copyDepth1();
+		RenderTargets targets = this.targets;
+		int[] readBefore = targets.read.clone();
 		Phase saved = this.phase;
 		this.phase = Phase.IDLE;
 		this.mipsFresh = 0;
@@ -594,7 +596,16 @@ public final class PackRenderer implements PackHooks {
 		}
 		this.phase = saved;
 		if (inPass) {
-			encoder.resumeRenderPass();
+			// Translucents go on top of the deferred output: buffers the deferred passes flipped are attached by their
+			// new current copy (otherwise water, glass etc. land in the stale one nothing reads).
+			encoder.resumeRenderPass(texture -> {
+				for (int i = 0; i < RenderTargets.COLORTEX; i++) {
+					if (targets.read[i] != readBefore[i] && texture == targets.other(i)) {
+						return targets.current(i);
+					}
+				}
+				return texture;
+			});
 		}
 	}
 

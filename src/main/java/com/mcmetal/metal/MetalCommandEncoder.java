@@ -177,7 +177,16 @@ public class MetalCommandEncoder implements CommandEncoderBackend {
 
 	/** Begins the suspended pass again on the same attachments (loading their contents) and restores its state. */
 	public void resumeRenderPass() {
+		this.resumeRenderPass(java.util.function.LongUnaryOperator.identity());
+	}
+
+	/**
+	 * Like {@link #resumeRenderPass()}, with each color attachment replaced by {@code remap} of it (e.g. a ping-pong
+	 * buffer that was flipped while the pass was suspended).
+	 */
+	public void resumeRenderPass(final java.util.function.LongUnaryOperator remap) {
 		for (int i = 0; i < this.passCount; i++) {
+			this.passTextures.setAtIndex(ValueLayout.JAVA_LONG, i, remap.applyAsLong(this.passTextures.getAtIndex(ValueLayout.JAVA_LONG, i)));
 			this.passClearFlags.setAtIndex(ValueLayout.JAVA_INT, i, 0);
 		}
 		this.beginNative(this.passCount, this.passDepth, false, 0.0, this.passArea, null);

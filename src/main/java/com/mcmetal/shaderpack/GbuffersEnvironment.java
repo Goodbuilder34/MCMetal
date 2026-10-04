@@ -43,7 +43,9 @@ public final class GbuffersEnvironment implements GlslTransformer.Environment {
 		layout(std430) readonly buffer _mcm_VertexData { uint _mcm_vdata[]; };
 		vec3 _mcm_vpos(int v) { int b = v * 7; return vec3(uintBitsToFloat(_mcm_vdata[b]), uintBitsToFloat(_mcm_vdata[b + 1]), uintBitsToFloat(_mcm_vdata[b + 2])); }
 		vec2 _mcm_vuv(int v) { int b = v * 7 + 4; return vec2(uintBitsToFloat(_mcm_vdata[b]), uintBitsToFloat(_mcm_vdata[b + 1])); }
-		int _mcm_qbase() { return gl_VertexIndex & ~3; }
+		// The first vertex of this vertex's quad. Indices count from the draw's base vertex, which (sections share
+		// pooled buffers) need not be a multiple of 4.
+		int _mcm_qbase() { return ((gl_VertexIndex - gl_BaseVertexARB) & ~3) + gl_BaseVertexARB; }
 		vec3 _mcm_quadNormal() {
 			int b = _mcm_qbase();
 			vec3 n = cross(_mcm_vpos(b + 2) - _mcm_vpos(b), _mcm_vpos(b + 3) - _mcm_vpos(b + 1));

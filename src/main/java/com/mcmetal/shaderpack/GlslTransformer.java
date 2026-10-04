@@ -794,6 +794,10 @@ public final class GlslTransformer {
 		usedAfter.addAll(used);
 		StringBuilder out = new StringBuilder(preprocessed.length() + 4096);
 		out.append("#version 450\n");
+		if (this.stage == Stage.VERTEX) {
+			// gl_BaseVertexARB, for reading a draw's vertices directly (see GbuffersEnvironment).
+			out.append("#extension GL_ARB_shader_draw_parameters : enable\n");
+		}
 		out.append(COMPAT_MACROS);
 		out.append(this.environment.prelude(this.stage, usedAfter));
 		out.append(declarations);

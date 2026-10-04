@@ -60,7 +60,7 @@ public final class BuiltinUniforms {
 	public float shadowFarPlane = 256.0F;
 
 	/**
-	 * @param levelProjection the projection the level is drawn with (bobbing included), in the game's convention
+	 * @param levelProjection the projection the level is drawn with, in the game's convention (view bobbing is in the view rotation, see GameRendererShaderMixin)
 	 * @param sunPathRotation the pack's sunPathRotation constant in degrees
 	 */
 	public void update(final Uniforms u, final GameRenderState state, final Matrix4f levelProjection, final int width, final int height, final float sunPathRotation,
