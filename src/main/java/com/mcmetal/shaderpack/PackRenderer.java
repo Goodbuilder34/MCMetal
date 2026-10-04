@@ -100,12 +100,12 @@ public final class PackRenderer implements PackHooks {
 		StandardMacros.defineOptions(preprocessor, pack.options());
 		this.properties = PackProperties.parse(pack.raw("/shaders.properties"), preprocessor, "/shaders.properties");
 		this.uniforms.setCustom(this.properties.customUniforms(), this.errors);
-		// Block IDs for mc_Entity: chunk meshes are rebuilt to carry them.
+		// Block IDs for mc_Entity and the pack's AO/face shading settings: chunk meshes are rebuilt to carry them.
 		String blocks = pack.raw("/block.properties");
 		Preprocessor blockPreprocessor = new Preprocessor(pack::raw);
 		StandardMacros.defineStandard(blockPreprocessor);
 		StandardMacros.defineOptions(blockPreprocessor, pack.options());
-		BlockIds.setActive(BlockIds.parse(blocks != null ? PackProperties.parse(blocks, blockPreprocessor, "/block.properties") : null));
+		BlockIds.setActive(BlockIds.parse(blocks != null ? PackProperties.parse(blocks, blockPreprocessor, "/block.properties") : null).withLighting(this.properties));
 		String items = pack.raw("/item.properties");
 		this.itemIds = ItemIds.parse(items != null ? PackProperties.parse(items, blockPreprocessor, "/item.properties") : null);
 		rebuildChunks();
@@ -447,16 +447,98 @@ public final class PackRenderer implements PackHooks {
 
 	/** Whether a section (camera-relative box) can cast into the shadow map. */
 	public boolean inShadowFrustum(final float minX, final float minY, final float minZ, final float maxX, final float maxY, final float maxZ) {
-		org.joml.Matrix4f mv = this.builtins.shadowModelView;
+		this.toShadowSpace(minX, minY, minZ, maxX, maxY, maxZ);
+		float[] b = this.shadowBox;
+		float h = this.builtins.shadowDistance;
+		// No near-plane test: anything between the sun and the receivers can cast, and packs usually compress shadow depth
+		// (e.g. gl_Position.z *= 0.2) so it is still inside the depth range.
+		return b[0] <= h && b[3] >= -h && b[1] <= h && b[4] >= -h && b[2] <= this.builtins.shadowFarPlane;
+	}
+
+	// Shadow caster culling (like Iris's advanced shadow culling): a caster only matters if, seen from the light, it
+	// covers part of something the camera sees and is not entirely behind it. Receivers are the camera's visible
+	// sections; per cell of a grid across the shadow map, the farthest receiver depth from the light is kept.
+	private static final float RECEIVER_CELL = 8.0F;
+	/** -Dmcmetal.pack.noShadowCulling=true: draw every shadow caster in the shadow frustum (for checking the culling). */
+	private static final boolean NO_SHADOW_CULLING = Boolean.getBoolean("mcmetal.pack.noShadowCulling");
+	private final float[] shadowBox = new float[6];
+	private float[] receiverDepth = new float[0];
+	private int receiverCells;
+
+	/** Starts collecting the sections the camera sees this frame (see {@link #addShadowReceiver}). */
+	public void beginShadowReceivers() {
+		int cells = (int) Math.ceil(this.builtins.shadowDistance * 2.0F / RECEIVER_CELL) + 1;
+		if (this.receiverDepth.length != cells * cells) {
+			this.receiverDepth = new float[cells * cells];
+		}
+		this.receiverCells = cells;
+		java.util.Arrays.fill(this.receiverDepth, Float.NEGATIVE_INFINITY);
+	}
+
+	/** A section the camera sees (camera-relative box): it can receive shadows. */
+	public void addShadowReceiver(final float minX, final float minY, final float minZ, final float maxX, final float maxY, final float maxZ) {
+		this.toShadowSpace(minX, minY, minZ, maxX, maxY, maxZ);
+		float[] b = this.shadowBox;
+		int n = this.receiverCells;
+		int x0 = this.cell(b[0]);
+		int x1 = this.cell(b[3]);
+		int y0 = this.cell(b[1]);
+		int y1 = this.cell(b[4]);
+		if (x1 < 0 || y1 < 0 || x0 >= n || y0 >= n) {
+			return;
+		}
+		for (int y = Math.max(y0, 0); y <= Math.min(y1, n - 1); y++) {
+			for (int x = Math.max(x0, 0); x <= Math.min(x1, n - 1); x++) {
+				int i = y * n + x;
+				this.receiverDepth[i] = Math.max(this.receiverDepth[i], b[5]);
+			}
+		}
+	}
+
+	/** Whether a section (camera-relative box) can shadow any receiver: some of it is nearer the light than one below it. */
+	public boolean shadowsReceiver(final float minX, final float minY, final float minZ, final float maxX, final float maxY, final float maxZ) {
+		if (NO_SHADOW_CULLING) {
+			return true;
+		}
+		this.toShadowSpace(minX, minY, minZ, maxX, maxY, maxZ);
+		float[] b = this.shadowBox;
+		int n = this.receiverCells;
+		for (int y = Math.max(this.cell(b[1]), 0); y <= Math.min(this.cell(b[4]), n - 1); y++) {
+			for (int x = Math.max(this.cell(b[0]), 0); x <= Math.min(this.cell(b[3]), n - 1); x++) {
+				if (this.receiverDepth[y * n + x] > b[2]) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private int cell(final float coordinate) {
+		return (int) Math.floor((coordinate + this.builtins.shadowDistance) / RECEIVER_CELL);
+	}
+
+	/** Bounds of a camera-relative box in shadow view space: x, y and depth from the light (min in [0-2], max in [3-5]). */
+	private void toShadowSpace(final float minX, final float minY, final float minZ, final float maxX, final float maxY, final float maxZ) {
+		org.joml.Matrix4f m = this.builtins.shadowModelView;
 		float cx = (minX + maxX) * 0.5F;
 		float cy = (minY + maxY) * 0.5F;
 		float cz = (minZ + maxZ) * 0.5F;
-		float radius = (float) Math.sqrt((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY) + (maxZ - minZ) * (maxZ - minZ)) * 0.5F;
-		float x = mv.m00() * cx + mv.m10() * cy + mv.m20() * cz + mv.m30();
-		float y = mv.m01() * cx + mv.m11() * cy + mv.m21() * cz + mv.m31();
-		float z = mv.m02() * cx + mv.m12() * cy + mv.m22() * cz + mv.m32();
-		float h = this.builtins.shadowDistance + radius;
-		return Math.abs(x) <= h && Math.abs(y) <= h && -z >= this.builtins.shadowNearPlane - radius && -z <= this.builtins.shadowFarPlane + radius;
+		float ex = (maxX - minX) * 0.5F;
+		float ey = (maxY - minY) * 0.5F;
+		float ez = (maxZ - minZ) * 0.5F;
+		float x = m.m00() * cx + m.m10() * cy + m.m20() * cz + m.m30();
+		float y = m.m01() * cx + m.m11() * cy + m.m21() * cz + m.m31();
+		float depth = -(m.m02() * cx + m.m12() * cy + m.m22() * cz + m.m32());
+		float rx = Math.abs(m.m00()) * ex + Math.abs(m.m10()) * ey + Math.abs(m.m20()) * ez;
+		float ry = Math.abs(m.m01()) * ex + Math.abs(m.m11()) * ey + Math.abs(m.m21()) * ez;
+		float rz = Math.abs(m.m02()) * ex + Math.abs(m.m12()) * ey + Math.abs(m.m22()) * ez;
+		float[] b = this.shadowBox;
+		b[0] = x - rx;
+		b[1] = y - ry;
+		b[2] = depth - rz;
+		b[3] = x + rx;
+		b[4] = y + ry;
+		b[5] = depth + rz;
 	}
 
 	/** Shadow phase: passes on the main target go to the shadow maps until {@link #endShadow}. */

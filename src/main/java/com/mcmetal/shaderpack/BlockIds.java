@@ -22,11 +22,16 @@ public final class BlockIds {
 	}
 
 	private static volatile @Nullable BlockIds active;
-	private static final ThreadLocal<int[]> CURRENT = ThreadLocal.withInitial(() -> new int[1]);
+	/** Per mesh-building thread: [0] the ID of the block being tesselated + 1 (0 = none), [1] 1 while a block is tesselated. */
+	private static final ThreadLocal<int[]> CURRENT = ThreadLocal.withInitial(() -> new int[2]);
 
 	private final Map<Block, List<Rule>> rules = new HashMap<>();
 	private final Map<String, Integer> tagRules = new HashMap<>();
 	private final Map<BlockState, Integer> cache = new ConcurrentHashMap<>();
+	/** shaders.properties separateAo: ambient occlusion goes in the vertex color's alpha instead of darkening it. */
+	private boolean separateAo;
+	/** shaders.properties oldLighting: keep the game's per-face shading (Iris default: off). */
+	private boolean oldLighting;
 
 	private BlockIds() {
 	}
@@ -93,6 +98,15 @@ public final class BlockIds {
 		this.rules.computeIfAbsent(block, b -> new ArrayList<>()).add(new Rule(properties, id));
 	}
 
+	/** Applies the pack's terrain lighting settings ({@code separateAo}, {@code oldLighting} in shaders.properties). */
+	public BlockIds withLighting(final @Nullable PackProperties shaders) {
+		if (shaders != null) {
+			this.separateAo = shaders.getBoolean("separateAo", false);
+			this.oldLighting = shaders.getBoolean("oldLighting", false);
+		}
+		return this;
+	}
+
 	/** The ID of a block state, or -1. */
 	public int idOf(final BlockState state) {
 		Integer cached = this.cache.get(state);
@@ -157,11 +171,27 @@ public final class BlockIds {
 	/** Marks the block being tesselated on this thread (0 = none). */
 	public static void begin(final BlockState state) {
 		BlockIds ids = active;
-		CURRENT.get()[0] = ids != null ? ids.idOf(state) + 1 : 0;
+		int[] current = CURRENT.get();
+		current[0] = ids != null ? ids.idOf(state) + 1 : 0;
+		current[1] = 1;
 	}
 
 	public static void end() {
-		CURRENT.get()[0] = 0;
+		int[] current = CURRENT.get();
+		current[0] = 0;
+		current[1] = 0;
+	}
+
+	/** While a chunk mesh block is tesselated: whether its ambient occlusion goes in the vertex alpha. */
+	public static boolean separateAo() {
+		BlockIds ids = active;
+		return ids != null && ids.separateAo && CURRENT.get()[1] != 0;
+	}
+
+	/** While a chunk mesh block is tesselated: whether the game's per-face shading is left out. */
+	public static boolean noFaceShading() {
+		BlockIds ids = active;
+		return ids != null && !ids.oldLighting && CURRENT.get()[1] != 0;
 	}
 
 	/** Light coordinates with the current block's ID in the high bytes of both 16-bit halves. */

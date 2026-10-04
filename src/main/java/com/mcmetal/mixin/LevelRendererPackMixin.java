@@ -2,6 +2,7 @@ package com.mcmetal.mixin;
 
 import com.mcmetal.shaderpack.PackManager;
 import com.mcmetal.shaderpack.PackRenderer;
+import com.mcmetal.shaderpack.ShadowCasters;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.framegraph.FrameGraphBuilder;
@@ -38,13 +39,21 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * deferred passes between the opaque and the translucent geometry.
  */
 @Mixin(LevelRenderer.class)
-public abstract class LevelRendererPackMixin {
+public abstract class LevelRendererPackMixin implements ShadowCasters {
 	@Shadow @Final private ObjectArrayList<SectionRenderDispatcher.RenderSection> visibleSections;
 	@Shadow private @Nullable ViewArea viewArea;
 	@Shadow private boolean usingMultiDrawIndirectForTerrain;
 	@Shadow @Final private LevelRenderState levelRenderState;
 	@Shadow @Final private TextureManager textureManager;
 	@Shadow @Final private GameRenderer gameRenderer;
+
+	@org.spongepowered.asm.mixin.Unique
+	private final ObjectArrayList<SectionRenderDispatcher.RenderSection> mcmetal$shadowCasters = new ObjectArrayList<>();
+
+	@Override
+	public ObjectArrayList<SectionRenderDispatcher.RenderSection> mcmetal$shadowCasters() {
+		return this.mcmetal$shadowCasters;
+	}
 
 	@Shadow
 	public abstract ChunkSectionsToRender prepareChunkRenders(org.joml.Matrix4fc modelViewMatrix, boolean respectTranslucentOrder);
@@ -61,12 +70,21 @@ public abstract class LevelRendererPackMixin {
 	private void mcmetal$shadowPass(final FrameGraphBuilder frame, final FeatureRenderDispatcher.PreparedFrame featureFrame, final GpuBufferSlice terrainFog,
 		final ChunkSectionsToRender chunkSectionsToRender, final boolean consistentDepthRequired, final CallbackInfo ci) {
 		PackRenderer renderer = PackManager.current();
+		this.mcmetal$shadowCasters.clear();
 		if (renderer == null || !renderer.wantsShadow() || this.viewArea == null) {
 			return;
 		}
-		// Shadow casters: every section within the shadow distance whose box reaches into the shadow frustum.
+		// Shadow casters: sections within the shadow distance whose box reaches into the shadow frustum. All of them get
+		// their meshes built and kept up to date (the game only does that for sections the camera sees, see
+		// LevelExtractorPackMixin); only those that can shadow something the camera sees are drawn.
 		Vec3 camera = this.levelRenderState.cameraRenderState.pos;
 		float range = renderer.shadowRenderDistance();
+		renderer.beginShadowReceivers();
+		for (SectionRenderDispatcher.RenderSection section : this.visibleSections) {
+			AABB box = section.getBoundingBox();
+			renderer.addShadowReceiver((float) (box.minX - camera.x), (float) (box.minY - camera.y), (float) (box.minZ - camera.z), (float) (box.maxX - camera.x),
+				(float) (box.maxY - camera.y), (float) (box.maxZ - camera.z));
+		}
 		ObjectArrayList<SectionRenderDispatcher.RenderSection> saved = new ObjectArrayList<>(this.visibleSections);
 		this.visibleSections.clear();
 		for (SectionRenderDispatcher.RenderSection section : ((ViewAreaAccessor) this.viewArea).mcmetal$sections()) {
@@ -81,7 +99,10 @@ public abstract class LevelRendererPackMixin {
 				continue;
 			}
 			if (renderer.inShadowFrustum(minX, minY, minZ, maxX, maxY, maxZ)) {
-				this.visibleSections.add(section);
+				this.mcmetal$shadowCasters.add(section);
+				if (section.getSectionMesh().hasRenderableLayers() && renderer.shadowsReceiver(minX, minY, minZ, maxX, maxY, maxZ)) {
+					this.visibleSections.add(section);
+				}
 			}
 		}
 		Matrix4f terrainMatrix = new Matrix4f(this.levelRenderState.cameraRenderState.viewRotationMatrix);

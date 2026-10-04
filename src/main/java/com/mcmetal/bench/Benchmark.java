@@ -20,6 +20,8 @@ public final class Benchmark {
 	private static final boolean FULLSCREEN = Boolean.getBoolean("mcmetal.benchmark.fullscreen");
 	/** Camera pitch to hold during the run: -90 = straight up at the sky, 90 = straight down. Unset = leave the camera alone. */
 	private static final String PITCH = System.getProperty("mcmetal.benchmark.pitch", "");
+	/** Camera yaw to hold during the run (0 = south, 90 = west). Unset = leave the camera alone. */
+	private static final String YAW = System.getProperty("mcmetal.benchmark.yaw", "");
 
 	private static long[] frames = new long[1 << 16];
 	private static long cpuTotal;
@@ -70,6 +72,10 @@ public final class Benchmark {
 		if (!PITCH.isEmpty() && minecraft.player != null) {
 			minecraft.player.setXRot(Float.parseFloat(PITCH));
 		}
+		if (!YAW.isEmpty() && minecraft.player != null) {
+			minecraft.player.setYRot(Float.parseFloat(YAW));
+			minecraft.player.setYHeadRot(Float.parseFloat(YAW));
+		}
 		if (warmupStart == 0L) {
 			if (FULLSCREEN && !minecraft.options.fullscreen().get()) {
 				minecraft.options.fullscreen().set(true);
@@ -83,6 +89,16 @@ public final class Benchmark {
 				if (time != null) {
 					server.execute(() -> server.overworld().dimensionType().defaultClock()
 						.ifPresent(clock -> server.clockManager().setTotalTicks(clock, time)));
+				}
+				// -Dmcmetal.benchmark.commands="cmd1|cmd2": commands run as the player (e.g. to build a test scene).
+				String commands = System.getProperty("mcmetal.benchmark.commands", "");
+				if (!commands.isEmpty()) {
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayers().getFirst();
+						for (String command : commands.split("\\|")) {
+							server.getCommands().performPrefixedCommand(player.createCommandSourceStack().withPermission(net.minecraft.server.permissions.PermissionSet.ALL_PERMISSIONS), command.trim());
+						}
+					});
 				}
 			}
 			warmupStart = now;

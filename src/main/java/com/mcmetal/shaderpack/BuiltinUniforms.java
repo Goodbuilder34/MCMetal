@@ -23,6 +23,9 @@ public final class BuiltinUniforms {
 	/** Converts the game's reversed [0, 1] depth projection to OpenGL's [-1, 1] convention, which packs assume. */
 	public static final Matrix4f TO_GL_DEPTH = new Matrix4f().m22(-2.0F).m32(1.0F);
 
+	/** -Dmcmetal.pack.frameTimeCounter=<seconds>: a fixed animation clock (waving plants, clouds), for comparable screenshots. */
+	private static final Double FROZEN_TIME = System.getProperty("mcmetal.pack.frameTimeCounter") != null ? Double.valueOf(System.getProperty("mcmetal.pack.frameTimeCounter")) : null;
+
 	private final long start = System.nanoTime();
 	private long lastFrame = System.nanoTime();
 	private int frameCounter;
@@ -107,7 +110,7 @@ public final class BuiltinUniforms {
 		u.set("frameCounter", this.frameCounter);
 		u.set("frameTime", frameTime);
 		u.set("frameTimeSmooth", this.frameTimeSmooth);
-		u.set("frameTimeCounter", ((now - this.start) / 1e9) % 3600.0);
+		u.set("frameTimeCounter", FROZEN_TIME != null ? FROZEN_TIME : ((now - this.start) / 1e9) % 3600.0);
 		u.set("frameMod8", this.frameCounter % 8);
 
 		// Celestial: OptiFine's sunAngle is 0 at sunrise, 0.25 at noon (the game's angle is 0 at noon).

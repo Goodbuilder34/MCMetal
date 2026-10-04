@@ -2,7 +2,7 @@
 	"required": true,
 	"package": "com.mcmetal.mixin",
 	"compatibilityLevel": "JAVA_25",
-	"client": ["GameRendererShaderMixin", "LevelRendererPackMixin", "MinecraftBenchmarkMixin", "PreferredGraphicsApiMixin", "WindowRenderScaleMixin", "MinecraftFrameLimiterMixin", "ViewAreaAccessor", "SectionCompilerMixin", "BufferBuilderMixin", "VideoSettingsScreenMixin", "KeyboardHandlerShaderMixin"],
+	"client": ["GameRendererShaderMixin", "LevelRendererPackMixin", "LevelExtractorPackMixin", "BlockModelLighterMixin", "MinecraftBenchmarkMixin", "PreferredGraphicsApiMixin", "WindowRenderScaleMixin", "MinecraftFrameLimiterMixin", "ViewAreaAccessor", "SectionCompilerMixin", "BufferBuilderMixin", "VideoSettingsScreenMixin", "KeyboardHandlerShaderMixin"],
 	"injectors": {
 		"defaultRequire": 1
 	}
