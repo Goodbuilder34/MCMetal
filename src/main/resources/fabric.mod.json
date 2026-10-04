@@ -1,0 +1,19 @@
+{
+	"schemaVersion": 1,
+	"id": "mcmetal",
+	"version": "${version}",
+	"name": "MCMetal",
+	"description": "Native Metal rendering backend for Apple Silicon.",
+	"authors": ["chaseva"],
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["com.mcmetal.MCMetal"]
+	},
+	"mixins": ["mcmetal.mixins.json"],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25"
+	}
+}

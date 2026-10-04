@@ -1,0 +1,97 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+loom {
+	runs {
+		client {
+			// Metal frame capture + HUD are opt-in via env when launching from Gradle.
+			vmArgs "--enable-native-access=ALL-UNNAMED", "-XX:+UseZGC"
+		}
+		// ./gradlew runBenchmark -Pbackend=metal|opengl|vulkan [-Pseconds=30]
+		// Loads the "New World" save straight away, measures frame times and quits.
+		benchmark {
+			client()
+			configName = "Benchmark"
+			def backend = project.findProperty("backend") ?: "metal"
+			vmArgs "--enable-native-access=ALL-UNNAMED", "-XX:+UseZGC",
+				"-Dmcmetal.benchmark=${project.findProperty("seconds") ?: 30}",
+				"-Dmcmetal.disable=${backend != "metal"}",
+				"-Dmcmetal.benchmark.fullscreen=${project.findProperty("fullscreen") ?: false}",
+				"-Dmcmetal.labels=${project.findProperty("labels") ?: false}"
+			if (project.hasProperty("dumpShaders")) {
+				vmArgs "-Dmcmetal.dumpShaders=${project.findProperty("dumpShaders")}"
+			}
+			if (project.hasProperty("limiter")) {
+				vmArgs "-Dmcmetal.frameLimiter=${project.findProperty("limiter")}"
+			}
+			if (project.hasProperty("screenshot")) {
+				vmArgs "-Dmcmetal.benchmark.screenshot=${project.findProperty("screenshot")}"
+			}
+			if (project.hasProperty("dump")) {
+				vmArgs "-Dmcmetal.benchmark.dump=${project.findProperty("dump")}"
+			}
+			if (project.hasProperty("pitch")) {
+				vmArgs "-Dmcmetal.benchmark.pitch=${project.findProperty("pitch")}"
+			}
+			if (project.hasProperty("scale")) {
+				vmArgs "-Dmcmetal.renderScale=${project.findProperty("scale")}"
+			}
+			programArgs "--quickPlaySingleplayer", "New World"
+			if (backend != "metal") {
+				programArgs "--graphicsBackend", backend
+			}
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+// libmcmetal: the Objective-C++ half of the backend, packed into the jar at natives/macos-arm64/.
+def nativeOut = layout.buildDirectory.dir("native")
+def buildNative = tasks.register("buildNative", Exec) {
+	inputs.files(fileTree("src/native"))
+	outputs.dir(nativeOut)
+	def output = nativeOut.get().file("natives/macos-arm64/libmcmetal.dylib").asFile
+	def sources = fileTree("src/native") { include "*.mm" }.files.collect { it.path }.sort()
+	doFirst { output.parentFile.mkdirs() }
+	commandLine "xcrun", "clang++",
+		"-std=c++20", "-O3", "-fobjc-arc", "-fvisibility=hidden",
+		"-arch", "arm64", "-mmacosx-version-min=15.0",
+		"-Wall", "-Wextra", "-Wno-unused-parameter", "-Werror",
+		"-dynamiclib", "-install_name", "@rpath/libmcmetal.dylib",
+		"-framework", "Metal", "-framework", "QuartzCore", "-framework", "Foundation", "-framework", "CoreVideo", "-framework", "AppKit",
+		*sources, "-o", output.absolutePath
+}
+
+processResources {
+	dependsOn buildNative
+	from(nativeOut)
+
+	def version = project.version
+	inputs.property "version", version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
