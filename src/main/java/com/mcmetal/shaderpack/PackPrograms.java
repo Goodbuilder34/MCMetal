@@ -6,7 +6,6 @@ import com.mcmetal.metal.PackBackend;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
 import com.mojang.renderpearl.api.pipeline.BlendFactor;
-import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -588,7 +587,7 @@ public final class PackPrograms {
 			}
 		}
 		try {
-			GbuffersEnvironment.VanillaLayout layout = layoutOf(info);
+			GbuffersEnvironment.VanillaLayout layout = layoutOf(info, vanilla.vertexSpirv());
 			String alpha = mapping.alphaTest();
 			String property = this.set.properties().get("alphaTest." + program.name());
 			if (property != null) {
@@ -716,11 +715,16 @@ public final class PackPrograms {
 		};
 	}
 
-	static GbuffersEnvironment.VanillaLayout layoutOf(final BackendRenderPipeline.CreateInfo info) {
+	static GbuffersEnvironment.VanillaLayout layoutOf(final BackendRenderPipeline.CreateInfo info, final byte @Nullable [] vertexSpirv) {
+		// Never info.shaders()' modules: the game has freed their SPIR-V by now.
 		Map<Integer, String> names = Map.of();
-		for (BackendRenderPipeline.CreateInfo.Shader shader : info.shaders()) {
-			if (shader.module().type() == ShaderType.VERTEX) {
-				names = PackCompiler.inputNames(shader.module().spv());
+		if (vertexSpirv != null) {
+			java.nio.ByteBuffer copy = org.lwjgl.system.MemoryUtil.memAlloc(vertexSpirv.length);
+			try {
+				copy.put(vertexSpirv).flip();
+				names = PackCompiler.inputNames(copy);
+			} finally {
+				org.lwjgl.system.MemoryUtil.memFree(copy);
 			}
 		}
 		Map<String, GbuffersEnvironment.Attribute> attributes = new LinkedHashMap<>();

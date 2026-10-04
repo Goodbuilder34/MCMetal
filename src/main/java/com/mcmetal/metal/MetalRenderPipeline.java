@@ -19,6 +19,11 @@ public final class MetalRenderPipeline implements BackendRenderPipeline {
 	private final int[] stageMasks;
 	private final String name;
 	private BackendRenderPipeline.@Nullable CreateInfo createInfo;
+	/**
+	 * Copy of the vertex shader's SPIR-V. The game frees its shader modules once the pipeline is built, so the
+	 * shaderpack runtime (which builds variants later, on another thread) must not read createInfo's modules.
+	 */
+	private byte @Nullable [] vertexSpirv;
 	private @Nullable Object pack;
 	/** Buffer index where a pack pipeline's vertex stage reads vertex buffer 0 directly, or -1. */
 	private int vertexPullSlot = -1;
@@ -69,6 +74,11 @@ public final class MetalRenderPipeline implements BackendRenderPipeline {
 	/** How the game created this pipeline (null for pack pipelines). */
 	public BackendRenderPipeline.@Nullable CreateInfo createInfo() {
 		return this.createInfo;
+	}
+
+	/** The vertex shader's SPIR-V, copied at creation (null for pack pipelines). */
+	public byte @Nullable [] vertexSpirv() {
+		return this.vertexSpirv;
 	}
 
 	/** The shaderpack runtime's data for a pack pipeline. */
@@ -123,6 +133,7 @@ public final class MetalRenderPipeline implements BackendRenderPipeline {
 		long fragmentLibrary = 0L;
 		long vertexFunction = 0L;
 		long fragmentFunction = 0L;
+		byte[] vertexSpirv = null;
 		try {
 			int[] stageMasks = new int[uniforms.size()];
 			for (BackendRenderPipeline.CreateInfo.Shader shader : info.shaders()) {
@@ -138,6 +149,9 @@ public final class MetalRenderPipeline implements BackendRenderPipeline {
 				long function = Native.functionCreate(library, msl.entryPoint());
 				boolean vertex = shader.module().type() == ShaderType.VERTEX;
 				if (vertex) {
+					java.nio.ByteBuffer spv = shader.module().spv();
+					vertexSpirv = new byte[spv.remaining()];
+					spv.duplicate().get(vertexSpirv);
 					vertexLibrary = library;
 					vertexFunction = function;
 				} else {
@@ -162,6 +176,7 @@ public final class MetalRenderPipeline implements BackendRenderPipeline {
 			long handle = Native.pipelineCreate(device.context(), vertexFunction, fragmentFunction, encodeDescriptor(info), info.name());
 			MetalRenderPipeline pipeline = new MetalRenderPipeline(device, handle, uniforms, stageMasks, info.name());
 			pipeline.createInfo = info;
+			pipeline.vertexSpirv = vertexSpirv;
 			return pipeline;
 		} catch (RuntimeException e) {
 			MCMetal.LOGGER.error("Couldn't compile Metal pipeline {}", info.name(), e);
