@@ -65,6 +65,11 @@ public final class PackManager {
 		return names;
 	}
 
+	/** A pack's file name without the .zip extension, for display. */
+	public static String displayName(final String file) {
+		return file.toLowerCase(java.util.Locale.ROOT).endsWith(".zip") ? file.substring(0, file.length() - 4) : file;
+	}
+
 	public static @Nullable String selected() {
 		readConfig();
 		return selected;

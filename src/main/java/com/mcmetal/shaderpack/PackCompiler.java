@@ -133,18 +133,27 @@ public final class PackCompiler {
 	}
 
 	public static Stage compile(final String name, final String source, final ShaderStage stage, final BindingPlan plan) {
-		if (OPTIMIZE) {
+		return compile(name, source, stage, plan, true);
+	}
+
+	/**
+	 * @param optimize whether spirv-opt may run (when enabled at all). It adds about half again to a program's compile
+	 * time, so it is left to full-screen passes, which run per screen pixel; gbuffers variants are many and their
+	 * cost is mostly in the pack's own math, which Metal's compiler optimizes anyway.
+	 */
+	public static Stage compile(final String name, final String source, final ShaderStage stage, final BindingPlan plan, final boolean optimize) {
+		if (OPTIMIZE && optimize) {
 			try {
-				return compile(name, source, stage, plan, true);
+				return compileWith(name, source, stage, plan, true);
 			} catch (RuntimeException e) {
 				// The optimizer occasionally trips over pack code the unoptimized path accepts.
 				MCMetal.LOGGER.debug("[pack] {}: optimized compile failed, retrying unoptimized: {}", name, e.getMessage());
 			}
 		}
-		return compile(name, source, stage, plan, false);
+		return compileWith(name, source, stage, plan, false);
 	}
 
-	private static Stage compile(final String name, final String source, final ShaderStage stage, final BindingPlan plan, final boolean optimize) {
+	private static Stage compileWith(final String name, final String source, final ShaderStage stage, final BindingPlan plan, final boolean optimize) {
 		ByteBuffer spirv = toSpirv(name, source, stage, optimize);
 		try {
 			return toMsl(name, spirv, stage, plan);

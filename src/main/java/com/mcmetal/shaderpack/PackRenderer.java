@@ -156,6 +156,7 @@ public final class PackRenderer implements PackHooks {
 	private void loadDimension(final String dimension) {
 		this.unloadDimension();
 		this.dimension = dimension;
+		toast("Loading shaderpack...", PackManager.displayName(this.pack.name()));
 		ProgramSet set = new ProgramSet(this.pack, ProgramSet.folderFor(this.pack, dimension), this.properties);
 		set.load();
 		this.errors.addAll(set.errors());
@@ -202,23 +203,28 @@ public final class PackRenderer implements PackHooks {
 			finalProgram = programs.debugFinal(debug);
 		}
 		ProgramSet.Program effectiveFinal = finalProgram != null ? finalProgram : programs.defaultFinal();
-		this.precompileVariants(programs, targets);
-		this.executor.submit(() -> {
-			long start = System.nanoTime();
-			List<java.util.concurrent.Future<PackPrograms.@Nullable Compiled>> futures = new ArrayList<>();
-			for (ProgramSet.Program program : passes) {
-				futures.add(this.executorSubmit(() -> programs.compileFullscreen(program, false, GpuFormat.RGBA8_UNORM)));
-			}
-			java.util.concurrent.Future<PackPrograms.@Nullable Compiled> finalFuture = this.executorSubmit(
-				() -> programs.compileFullscreen(effectiveFinal, true, GpuFormat.RGBA8_UNORM));
+		// Full-screen passes first, then the world's essential gbuffers variants, then everything else: the pool runs
+		// tasks in submission order, and the pack switches on once the first two groups are done.
+		long start = System.nanoTime();
+		List<java.util.concurrent.CompletableFuture<PackPrograms.@Nullable Compiled>> futures = new ArrayList<>();
+		for (ProgramSet.Program program : passes) {
+			futures.add(java.util.concurrent.CompletableFuture.supplyAsync(() -> programs.compileFullscreen(program, false, GpuFormat.RGBA8_UNORM), this.executor));
+		}
+		java.util.concurrent.CompletableFuture<PackPrograms.@Nullable Compiled> finalFuture = java.util.concurrent.CompletableFuture.supplyAsync(
+			() -> programs.compileFullscreen(effectiveFinal, true, GpuFormat.RGBA8_UNORM), this.executor);
+		List<java.util.concurrent.CompletableFuture<?>> waitFor = new ArrayList<>(futures);
+		waitFor.add(finalFuture);
+		waitFor.addAll(this.precompileVariants(programs, targets));
+		String packName = this.pack.name();
+		java.util.concurrent.CompletableFuture.allOf(waitFor.toArray(java.util.concurrent.CompletableFuture[]::new)).whenComplete((ignored, failure) -> {
 			List<PackPrograms.Compiled> compiled = new ArrayList<>();
-			for (java.util.concurrent.Future<PackPrograms.@Nullable Compiled> future : futures) {
-				PackPrograms.Compiled c = get(future);
+			for (java.util.concurrent.CompletableFuture<PackPrograms.@Nullable Compiled> future : futures) {
+				PackPrograms.Compiled c = future.getNow(null);
 				if (c != null) {
 					compiled.add(c);
 				}
 			}
-			PackPrograms.Compiled fin = get(finalFuture);
+			PackPrograms.Compiled fin = finalFuture.getNow(null);
 			synchronized (this) {
 				if (this.programs != programs) {
 					return;
@@ -232,9 +238,22 @@ public final class PackRenderer implements PackHooks {
 				this.finalPass = fin;
 				this.passesReady = fin != null;
 			}
-			MCMetal.LOGGER.info("Shaderpack {} ({}): {} passes compiled in {} ms{}", this.pack.name(), set.folder(), compiled.size() + 1,
-				(System.nanoTime() - start) / 1_000_000, this.errors.isEmpty() ? "" : ", " + this.errors.size() + " problems");
+			long ms = (System.nanoTime() - start) / 1_000_000;
+			MCMetal.LOGGER.info("Shaderpack {} ({}): {} passes compiled, ready in {} ms{}", packName, set.folder(), compiled.size() + 1, ms,
+				this.errors.isEmpty() ? "" : ", " + this.errors.size() + " problems");
+			toast(fin != null ? "Shaderpack ready" : "Shaderpack failed to load", PackManager.displayName(packName)
+				+ (fin != null ? " (" + String.format(java.util.Locale.ROOT, "%.1f", ms / 1000.0) + " s)" : ""));
 		});
+	}
+
+	private static final net.minecraft.client.gui.components.toasts.SystemToast.SystemToastId TOAST =
+		new net.minecraft.client.gui.components.toasts.SystemToast.SystemToastId(3000L);
+
+	/** Shows (or replaces) the shaderpack status toast; callable from any thread. */
+	static void toast(final String title, final String message) {
+		net.minecraft.client.Minecraft minecraft = net.minecraft.client.Minecraft.getInstance();
+		minecraft.execute(() -> net.minecraft.client.gui.components.toasts.SystemToast.addOrUpdate(minecraft.gui.toastManager(), TOAST,
+			net.minecraft.network.chat.Component.literal(title), net.minecraft.network.chat.Component.literal(message)));
 	}
 
 	private void configureShadows(final ProgramSet set, final RenderTargets targets) {
@@ -259,19 +278,6 @@ public final class PackRenderer implements PackHooks {
 			return Float.parseFloat(value.trim().replaceAll("[fF]$", ""));
 		} catch (NumberFormatException e) {
 			return fallback;
-		}
-	}
-
-	private <T> java.util.concurrent.Future<T> executorSubmit(final java.util.concurrent.Callable<T> task) {
-		// The coordinating task waits on these from one pool thread; the pool has at least two threads.
-		return this.executor.submit(task);
-	}
-
-	private static <T> @Nullable T get(final java.util.concurrent.Future<T> future) {
-		try {
-			return future.get();
-		} catch (Exception e) {
-			return null;
 		}
 	}
 
@@ -832,17 +838,19 @@ public final class PackRenderer implements PackHooks {
 	}
 
 	/** Starts compiling the pack's variant of a game pipeline (no-op when already requested). */
-	private void requestVariant(final MetalRenderPipeline vanilla, final Mode mode, final PackPrograms programs, final RenderTargets targets) {
+	/** Starts compiling the pack's variant of a game pipeline; null when nothing new was started. */
+	private java.util.concurrent.@Nullable CompletableFuture<Void> requestVariant(final MetalRenderPipeline vanilla, final Mode mode, final PackPrograms programs,
+		final RenderTargets targets) {
 		VariantKey key = new VariantKey(vanilla, mode);
 		PackPrograms.Mapping mapping = PackPrograms.map(vanilla.name(), mode == Mode.HAND, mode == Mode.SHADOW);
 		if (mapping == null || vanilla.createInfo() == null) {
 			if (this.variants.putIfAbsent(key, FAILED) == null && DEBUG) {
 				MCMetal.LOGGER.info("[pack] no program for {} ({})", vanilla.name(), mode);
 			}
-			return;
+			return null;
 		}
 		if (this.variants.putIfAbsent(key, PENDING) != null) {
-			return;
+			return null;
 		}
 		int[] attachments = mode == Mode.SHADOW ? programs.shadowAttachments() : programs.attachmentsFor(mapping.program());
 		GpuFormat[] formats = new GpuFormat[attachments.length];
@@ -850,7 +858,7 @@ public final class PackRenderer implements PackHooks {
 			formats[i] = mode == Mode.SHADOW ? targets.shadowFormats[attachments[i]] : targets.buffers[attachments[i]].format;
 		}
 		this.compiling.incrementAndGet();
-		this.executor.submit(() -> {
+		return java.util.concurrent.CompletableFuture.runAsync(() -> {
 			try {
 				int before = this.errors.size();
 				PackPrograms.Compiled compiled = programs.compileVariant(vanilla, mapping, mode == Mode.HAND, mode == Mode.SHADOW, attachments, formats);
@@ -864,24 +872,49 @@ public final class PackRenderer implements PackHooks {
 			} finally {
 				this.compiling.decrementAndGet();
 			}
-		});
+		}, this.executor);
 	}
 
 	/** Compiles variants of every game pipeline created so far, so geometry doesn't pop in after a pack loads. */
-	private void precompileVariants(final PackPrograms programs, final RenderTargets targets) {
-		com.mcmetal.metal.MetalDevice device = this.backend.device();
-		for (MetalRenderPipeline vanilla : device.pipelines()) {
-			if (vanilla.pack() != null || vanilla.createInfo() == null) {
-				continue;
+	/**
+	 * Queues the pack's variants of every game pipeline. The ones the world can't be drawn without (terrain, sky,
+	 * entities and their shadows) go first, and their futures are returned so the pack waits for them; the rest
+	 * (hand, particles, effects...) compile after.
+	 */
+	private List<java.util.concurrent.CompletableFuture<Void>> precompileVariants(final PackPrograms programs, final RenderTargets targets) {
+		List<java.util.concurrent.CompletableFuture<Void>> essential = new ArrayList<>();
+		List<MetalRenderPipeline> pipelines = new ArrayList<>();
+		for (MetalRenderPipeline vanilla : this.backend.device().pipelines()) {
+			if (vanilla.pack() == null && vanilla.createInfo() != null) {
+				pipelines.add(vanilla);
 			}
-			this.requestVariant(vanilla, Mode.WORLD, programs, targets);
+		}
+		for (MetalRenderPipeline vanilla : pipelines) {
 			String name = vanilla.name();
+			boolean core = name.contains("terrain") || name.contains("sky") || name.contains("entity");
+			if (core) {
+				addIfStarted(essential, this.requestVariant(vanilla, Mode.WORLD, programs, targets));
+				if (this.shadowsEnabled && (name.contains("terrain") || name.contains("entity"))) {
+					addIfStarted(essential, this.requestVariant(vanilla, Mode.SHADOW, programs, targets));
+				}
+			}
+		}
+		for (MetalRenderPipeline vanilla : pipelines) {
+			String name = vanilla.name();
+			this.requestVariant(vanilla, Mode.WORLD, programs, targets);
 			if (name.contains("entity") || name.contains("item") || name.contains("glint")) {
 				this.requestVariant(vanilla, Mode.HAND, programs, targets);
 			}
 			if (this.shadowsEnabled && (name.contains("terrain") || name.contains("entity") || name.contains("item"))) {
 				this.requestVariant(vanilla, Mode.SHADOW, programs, targets);
 			}
+		}
+		return essential;
+	}
+
+	private static void addIfStarted(final List<java.util.concurrent.CompletableFuture<Void>> list, final java.util.concurrent.@Nullable CompletableFuture<Void> future) {
+		if (future != null) {
+			list.add(future);
 		}
 	}
 

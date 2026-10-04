@@ -330,6 +330,7 @@ public final class PackPrograms {
 
 	private static final java.util.regex.Pattern DISCARD = java.util.regex.Pattern.compile("\\bdiscard\\b");
 	private static final java.util.regex.Pattern DISCARD_STATEMENT = java.util.regex.Pattern.compile("\\bdiscard\\s*;");
+	private static final boolean OPTIMIZE_GBUFFERS = Boolean.getBoolean("mcmetal.pack.optimizeGbuffers");
 	private static final boolean KEEP_SOLID_DISCARD = Boolean.getBoolean("mcmetal.pack.keepSolidDiscard");
 
 	/**
@@ -621,8 +622,8 @@ public final class PackPrograms {
 			Plan plan = new Plan(layout, tfs.usedIdentifiers().contains("watershadow"), Set.of());
 			plan.stage = shadow ? "shadow" : "gbuffers";
 			String label = this.set.folder() + "/" + program.name() + " (" + vanilla.name() + ")";
-			PackCompiler.Stage v = PackCompiler.compile(label + ".vsh", tvs.source(), PackCompiler.ShaderStage.VERTEX, plan);
-			PackCompiler.Stage f = PackCompiler.compile(label + ".fsh", tfs.source(), PackCompiler.ShaderStage.FRAGMENT, plan);
+			PackCompiler.Stage v = PackCompiler.compile(label + ".vsh", tvs.source(), PackCompiler.ShaderStage.VERTEX, plan, OPTIMIZE_GBUFFERS);
+			PackCompiler.Stage f = PackCompiler.compile(label + ".fsh", tfs.source(), PackCompiler.ShaderStage.FRAGMENT, plan, OPTIMIZE_GBUFFERS);
 
 			// Descriptor: the game's vertex layout, rasterizer and blending; our attachments; OpenGL depth convention.
 			int[] original = PackBackend.descriptorOf(vanilla);
