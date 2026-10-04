@@ -36,14 +36,32 @@ public class MetalRenderPass implements RenderPassBackend {
 	private long dirtyUniforms;
 	private RenderPass.RenderArea renderArea = new RenderPass.RenderArea(0, 0, 0, 0);
 	private int debugGroups;
+	// Shaderpack redirection: pipelines are swapped for the pack's; draws of pipelines without one are skipped.
+	private boolean redirected;
+	private boolean skipDraws;
+	private @Nullable MetalRenderPipeline requested;
+	private final long[] vertexBuffers = new long[8];
+	private final long[] vertexOffsets = new long[8];
+	private long indexBuffer;
+	private int indexSize;
+	private final MetalCommandEncoder encoder;
+	private boolean scissor;
+	private final int[] scissorRect = new int[4];
 
-	MetalRenderPass(final MetalDevice device, final Arena arena) {
+	MetalRenderPass(final MetalDevice device, final Arena arena, final MetalCommandEncoder encoder) {
 		this.device = device;
+		this.encoder = encoder;
 		this.context = device.context();
 		this.bindEntries = arena.allocate(ValueLayout.JAVA_LONG, (long) Native.MAX_UNIFORMS * ENTRY_LONGS);
 	}
 
-	void begin(final RenderPass.RenderArea area) {
+	void begin(final RenderPass.RenderArea area, final boolean redirected) {
+		this.redirected = redirected;
+		this.skipDraws = false;
+		this.requested = null;
+		java.util.Arrays.fill(this.vertexBuffers, 0L);
+		this.indexBuffer = 0L;
+		this.scissor = false;
 		this.renderArea = area;
 		this.pipeline = null;
 		this.dirtyUniforms = 0L;
@@ -83,11 +101,82 @@ public class MetalRenderPass implements RenderPassBackend {
 		if (!(pipeline instanceof MetalRenderPipeline metalPipeline)) {
 			throw new IllegalArgumentException("Pipeline must be instance of MetalRenderPipeline");
 		}
-		this.pipeline = metalPipeline;
-		Native.passSetPipeline(this.context, metalPipeline.handle());
+		this.requested = metalPipeline;
 		Arrays.fill(this.uniforms, null);
-		int count = metalPipeline.uniforms().size();
+		this.applyPipeline(metalPipeline);
+	}
+
+	private void applyPipeline(final MetalRenderPipeline requested) {
+		MetalRenderPipeline pipeline = requested;
+		this.skipDraws = false;
+		PackHooks hooks = this.redirected ? PackHooks.current() : null;
+		if (hooks != null) {
+			pipeline = hooks.substitute(requested);
+			if (pipeline == null) {
+				this.skipDraws = true;
+				this.pipeline = null;
+				return;
+			}
+		}
+		if (hooks != null) {
+			long[] attachments = hooks.attachments(pipeline);
+			if (attachments != null && this.encoder.switchAttachments(attachments)) {
+				this.restoreState();
+			}
+		}
+		this.pipeline = pipeline;
+		Native.passSetPipeline(this.context, pipeline.handle());
+		this.bindVertexPull();
+		int count = pipeline.uniforms().size();
 		this.dirtyUniforms = count >= 64 ? -1L : (1L << count) - 1L;
+		if (hooks != null) {
+			hooks.bindPackResources(pipeline);
+		}
+	}
+
+	/** After the native pass was suspended and begun again: restore pipeline, buffers and bindings. */
+	void resume() {
+		if (this.requested != null) {
+			this.applyPipeline(this.requested);
+		}
+		this.restoreState();
+	}
+
+	/** Re-sets buffers and scissor on a newly begun native pass. */
+	private void restoreState() {
+		if (this.scissor) {
+			Native.passSetScissor(this.context, this.scissorRect[0], this.scissorRect[1], this.scissorRect[2], this.scissorRect[3]);
+		}
+		for (int slot = 0; slot < this.vertexBuffers.length; slot++) {
+			if (this.vertexBuffers[slot] != 0L) {
+				Native.passSetVertexBuffer(this.context, slot, this.vertexBuffers[slot], this.vertexOffsets[slot]);
+			}
+		}
+		if (this.indexBuffer != 0L) {
+			Native.passSetIndexBuffer(this.context, this.indexBuffer, this.indexSize);
+		}
+	}
+
+	/** Pack pipelines that read their vertices directly get vertex buffer 0 as a plain buffer too. */
+	private void bindVertexPull() {
+		MetalRenderPipeline pipeline = this.pipeline;
+		if (pipeline == null || pipeline.vertexPullSlot() < 0 || this.vertexBuffers[0] == 0L) {
+			return;
+		}
+		this.bindEntries.setAtIndex(ValueLayout.JAVA_LONG, 0, Native.BIND_BUFFER | (1L << 8));
+		this.bindEntries.setAtIndex(ValueLayout.JAVA_LONG, 1, pipeline.vertexPullSlot());
+		this.bindEntries.setAtIndex(ValueLayout.JAVA_LONG, 2, this.vertexBuffers[0]);
+		this.bindEntries.setAtIndex(ValueLayout.JAVA_LONG, 3, this.vertexOffsets[0]);
+		this.bindEntries.setAtIndex(ValueLayout.JAVA_LONG, 4, 0L);
+		Native.passBind(this.context, this.bindEntries.address(), 1);
+	}
+
+	/** Re-binds the pack's resources of the current pipeline (e.g. after per-draw uniforms changed). */
+	public void rebindPack() {
+		PackHooks hooks = PackHooks.current();
+		if (hooks != null && this.pipeline != null && this.redirected) {
+			hooks.bindPackResources(this.pipeline);
+		}
 	}
 
 	@Override
@@ -103,34 +192,56 @@ public class MetalRenderPass implements RenderPassBackend {
 
 	@Override
 	public void enableScissor(final int x, final int y, final int width, final int height) {
+		this.scissor = true;
+		this.scissorRect[0] = x;
+		this.scissorRect[1] = y;
+		this.scissorRect[2] = width;
+		this.scissorRect[3] = height;
 		Native.passSetScissor(this.context, x, y, width, height);
 	}
 
 	@Override
 	public void disableScissor() {
+		this.scissor = false;
 		Native.passSetScissor(this.context, this.renderArea.x(), this.renderArea.y(), this.renderArea.width(), this.renderArea.height());
 	}
 
 	@Override
 	public void setVertexBuffer(final int slot, final @Nullable GpuBufferSlice vertexBuffer) {
 		if (vertexBuffer != null) {
-			Native.passSetVertexBuffer(this.context, slot, ((MetalBuffer) vertexBuffer.buffer()).handle(), vertexBuffer.offset());
+			long handle = ((MetalBuffer) vertexBuffer.buffer()).handle();
+			Native.passSetVertexBuffer(this.context, slot, handle, vertexBuffer.offset());
+			if (slot < this.vertexBuffers.length) {
+				this.vertexBuffers[slot] = handle;
+				this.vertexOffsets[slot] = vertexBuffer.offset();
+			}
+			if (slot == 0) {
+				this.bindVertexPull();
+			}
 		}
 	}
 
 	@Override
 	public void setIndexBuffer(final GpuBuffer indexBuffer, final IndexType indexType) {
-		Native.passSetIndexBuffer(this.context, ((MetalBuffer) indexBuffer).handle(), indexType.bytes);
+		this.indexBuffer = ((MetalBuffer) indexBuffer).handle();
+		this.indexSize = indexType.bytes;
+		Native.passSetIndexBuffer(this.context, this.indexBuffer, this.indexSize);
 	}
 
 	@Override
 	public void drawIndexed(final int indexCount, final int instanceCount, final int firstIndex, final int vertexOffset, final int firstInstance) {
+		if (this.skipDraws) {
+			return;
+		}
 		this.flushUniforms();
 		Native.passDrawIndexed(this.context, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 	}
 
 	@Override
 	public void multiDrawIndexed(final IntBuffer drawParameters, final int instanceCount, final int firstInstance, final int drawCount) {
+		if (this.skipDraws) {
+			return;
+		}
 		this.flushUniforms();
 		Native.passMultiDrawIndexed(this.context, MemoryUtil.memAddress(drawParameters), drawCount, instanceCount, firstInstance);
 	}
@@ -142,18 +253,27 @@ public class MetalRenderPass implements RenderPassBackend {
 
 	@Override
 	public void drawIndexedIndirect(final GpuBufferSlice commands, final int drawCount) {
+		if (this.skipDraws) {
+			return;
+		}
 		this.flushUniforms();
 		Native.passDrawIndexedIndirect(this.context, ((MetalBuffer) commands.buffer()).handle(), commands.offset(), drawCount);
 	}
 
 	@Override
 	public void draw(final int vertexCount, final int instanceCount, final int firstVertex, final int firstInstance) {
+		if (this.skipDraws) {
+			return;
+		}
 		this.flushUniforms();
 		Native.passDraw(this.context, vertexCount, instanceCount, firstVertex, firstInstance);
 	}
 
 	@Override
 	public void multiDraw(final IntBuffer drawParameters, final int instanceCount, final int firstInstance, final int drawCount) {
+		if (this.skipDraws) {
+			return;
+		}
 		this.flushUniforms();
 		Native.passMultiDraw(this.context, MemoryUtil.memAddress(drawParameters), drawCount, instanceCount, firstInstance);
 	}
@@ -165,6 +285,9 @@ public class MetalRenderPass implements RenderPassBackend {
 
 	@Override
 	public void drawIndirect(final GpuBufferSlice commands, final int drawCount) {
+		if (this.skipDraws) {
+			return;
+		}
 		this.flushUniforms();
 		Native.passDrawIndirect(this.context, ((MetalBuffer) commands.buffer()).handle(), commands.offset(), drawCount);
 	}

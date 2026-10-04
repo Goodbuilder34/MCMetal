@@ -43,12 +43,16 @@ public class MetalCommandEncoder implements CommandEncoderBackend {
 	private final MetalRenderPass renderPass;
 	private long submitted;
 	private boolean inRenderPass;
+	// Arguments of the open pass, for resuming it after a suspension (see suspendRenderPass).
+	private int passCount;
+	private long passDepth;
+	private RenderPass.RenderArea passArea = new RenderPass.RenderArea(0, 0, 0, 0);
 
 	MetalCommandEncoder(final MetalDevice device) {
 		this.device = device;
 		this.context = device.context();
 		this.transientMemory = new MetalTransientMemory(device, this);
-		this.renderPass = new MetalRenderPass(device, this.arena);
+		this.renderPass = new MetalRenderPass(device, this.arena, this);
 	}
 
 	void destroy() {
@@ -88,6 +92,28 @@ public class MetalCommandEncoder implements CommandEncoderBackend {
 	public RenderPassBackend createRenderPass(final RenderPassDescriptor descriptor) {
 		List<RenderPassDescriptor.@Nullable Attachment<Optional<Vector4fc>>> colors = descriptor.colorAttachments();
 		int count = Math.min(colors.size(), MAX_COLOR_ATTACHMENTS);
+		PackHooks hooks = PackHooks.current();
+		if (hooks != null) {
+			RenderPassDescriptor.Attachment<Optional<Vector4fc>> first = count > 0 ? colors.get(0) : null;
+			RenderPassDescriptor.Attachment<OptionalDouble> depthAttachment = descriptor.depthAttachment();
+			MetalTexture color = first != null ? ((MetalTextureView) first.textureView()).texture() : null;
+			MetalTexture depthTexture = depthAttachment != null ? ((MetalTextureView) depthAttachment.textureView()).texture() : null;
+			PackHooks.Redirect redirect = hooks.redirect(color, depthTexture);
+			if (redirect != null) {
+				int n = Math.min(redirect.colors().length, MAX_COLOR_ATTACHMENTS);
+				for (int i = 0; i < n; i++) {
+					this.passTextures.setAtIndex(ValueLayout.JAVA_LONG, i, redirect.colors()[i]);
+					this.passClearFlags.setAtIndex(ValueLayout.JAVA_INT, i, 0);
+				}
+				// The game's depth clears use its reversed convention (0 = far); pack depth is OpenGL's (1 = far).
+				boolean clear = depthAttachment != null && depthAttachment.clearValue().isPresent();
+				RenderPass.RenderArea area = redirect.width() > 0 ? new RenderPass.RenderArea(0, 0, redirect.width(), redirect.height()) : descriptor.renderArea();
+				this.beginNative(n, redirect.depth(), clear && redirect.depth() != 0L, 1.0, area, descriptor);
+				this.inRenderPass = true;
+				this.renderPass.begin(area, true);
+				return this.renderPass;
+			}
+		}
 		for (int i = 0; i < count; i++) {
 			RenderPassDescriptor.Attachment<Optional<Vector4fc>> attachment = colors.get(i);
 			if (attachment == null) {
@@ -113,7 +139,18 @@ public class MetalCommandEncoder implements CommandEncoderBackend {
 		double depthValue = clearDepth ? depth.clearValue().getAsDouble() : 0.0;
 		RenderPass.RenderArea area = descriptor.renderArea();
 
-		if (this.device.labels()) {
+		this.beginNative(count, depthHandle, clearDepth, depthValue, area, descriptor);
+		this.inRenderPass = true;
+		this.renderPass.begin(area, false);
+		return this.renderPass;
+	}
+
+	private void beginNative(final int count, final long depthHandle, final boolean clearDepth, final double depthValue, final RenderPass.RenderArea area,
+		final @Nullable RenderPassDescriptor descriptor) {
+		this.passCount = count;
+		this.passDepth = depthHandle;
+		this.passArea = area;
+		if (this.device.labels() && descriptor != null) {
 			try (Arena labelArena = Arena.ofConfined()) {
 				Native.beginPass(
 					this.context, this.passTextures.address(), this.passClearFlags.address(), this.passClearColors.address(), count, depthHandle, clearDepth, depthValue,
@@ -126,8 +163,52 @@ public class MetalCommandEncoder implements CommandEncoderBackend {
 				area.x(), area.y(), area.width(), area.height(), 0L
 			);
 		}
-		this.inRenderPass = true;
-		this.renderPass.begin(area);
+	}
+
+	/** Whether the game currently has a render pass open. */
+	public boolean inRenderPass() {
+		return this.inRenderPass;
+	}
+
+	/** Ends the open native pass so other work can be encoded; {@link #resumeRenderPass} continues it. */
+	public void suspendRenderPass() {
+		Native.passSuspend(this.context);
+	}
+
+	/** Begins the suspended pass again on the same attachments (loading their contents) and restores its state. */
+	public void resumeRenderPass() {
+		for (int i = 0; i < this.passCount; i++) {
+			this.passClearFlags.setAtIndex(ValueLayout.JAVA_INT, i, 0);
+		}
+		this.beginNative(this.passCount, this.passDepth, false, 0.0, this.passArea, null);
+		this.renderPass.resume();
+	}
+
+	/**
+	 * Continues the open pass on other color attachments (same depth, contents loaded). Returns false when they are
+	 * already the current ones.
+	 */
+	boolean switchAttachments(final long[] colors) {
+		int n = Math.min(colors.length, MAX_COLOR_ATTACHMENTS);
+		if (n == this.passCount) {
+			boolean same = true;
+			for (int i = 0; i < n && same; i++) {
+				same = this.passTextures.getAtIndex(ValueLayout.JAVA_LONG, i) == colors[i];
+			}
+			if (same) {
+				return false;
+			}
+		}
+		Native.passSuspend(this.context);
+		for (int i = 0; i < n; i++) {
+			this.passTextures.setAtIndex(ValueLayout.JAVA_LONG, i, colors[i]);
+			this.passClearFlags.setAtIndex(ValueLayout.JAVA_INT, i, 0);
+		}
+		this.beginNative(n, this.passDepth, false, 0.0, this.passArea, null);
+		return true;
+	}
+
+	public MetalRenderPass currentRenderPass() {
 		return this.renderPass;
 	}
 
@@ -144,6 +225,10 @@ public class MetalCommandEncoder implements CommandEncoderBackend {
 	@Override
 	public void clearColorTexture(final GpuTexture colorTexture, final Vector4fc clearColor) {
 		MetalTexture texture = (MetalTexture) colorTexture;
+		PackHooks hooks = PackHooks.current();
+		if (hooks != null && hooks.clearColor(texture, clearColor)) {
+			return;
+		}
 		for (int mip = 0; mip < texture.getMipLevels(); mip++) {
 			Native.clearTexture(this.context, texture.handle(), mip, 0, clearColor.x(), clearColor.y(), clearColor.z(), clearColor.w(), 0.0);
 		}
@@ -176,6 +261,10 @@ public class MetalCommandEncoder implements CommandEncoderBackend {
 	@Override
 	public void clearDepthTexture(final GpuTexture depthTexture, final double clearDepth) {
 		MetalTexture texture = (MetalTexture) depthTexture;
+		PackHooks hooks = PackHooks.current();
+		if (hooks != null && hooks.clearDepth(texture, clearDepth)) {
+			return;
+		}
 		for (int mip = 0; mip < texture.getMipLevels(); mip++) {
 			Native.clearTexture(this.context, texture.handle(), mip, 0, 0.0F, 0.0F, 0.0F, 0.0F, clearDepth);
 		}

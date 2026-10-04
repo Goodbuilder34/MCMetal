@@ -2,7 +2,7 @@
 
 #include "internal.h"
 
-#define MCM_ABI_VERSION 3
+#define MCM_ABI_VERSION 4
 
 static const char *INTERNAL_SHADERS = R"METAL(
 #include <metal_stdlib>
@@ -101,6 +101,7 @@ extern "C" void *mcm_device_create(char *name_out, int32_t name_len, int64_t *in
 			return nullptr;
 		}
 		ctx->presentPipeline = make_internal_pipeline(ctx, @"mcm_present_vs", @"mcm_present_fs", MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid);
+		fx_warm_up(ctx);
 
 		if (name_out && name_len > 0) {
 			strncpy(name_out, device.name.UTF8String, (size_t)name_len - 1);
@@ -136,5 +137,6 @@ extern "C" void mcm_device_destroy(void *handle) {
 		[ctx->commandBuffer waitUntilCompleted];
 		ctx->commandBuffer = nil;
 	}
+	fx_destroy(ctx);
 	delete ctx;
 }

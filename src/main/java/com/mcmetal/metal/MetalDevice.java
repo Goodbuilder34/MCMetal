@@ -48,6 +48,19 @@ public class MetalDevice implements GpuDeviceBackend {
 		return current;
 	}
 
+	/**
+	 * Runs the shader layer's world stage (AO, sun shading, haze, god rays) on the given color/depth targets.
+	 * {@code params} points at the parameter block described in {@code com.mcmetal.shaders.ShaderLayer}.
+	 */
+	public boolean applyWorldEffects(final GpuTexture color, final GpuTexture depth, final long params, final int flags) {
+		return Native.fxWorld(this.context, ((MetalTexture) color).handle(), ((MetalTexture) depth).handle(), params, flags);
+	}
+
+	/** Runs the shader layer's final stage (bloom, tone mapping, grading) on the given color target. */
+	public boolean applyFinalEffects(final GpuTexture color, final long params, final int flags) {
+		return Native.fxFinal(this.context, ((MetalTexture) color).handle(), params, flags);
+	}
+
 	/** See {@link Native#gpuTime}. */
 	public long[] gpuTime() {
 		return Native.gpuTime(this.context);
@@ -162,10 +175,21 @@ public class MetalDevice implements GpuDeviceBackend {
 		return this.labels;
 	}
 
+	private final java.util.Set<MetalRenderPipeline> pipelines = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+	/** The game's pipelines compiled so far (shaderpacks precompile their variants of these). */
+	public java.util.List<MetalRenderPipeline> pipelines() {
+		this.pipelines.removeIf(MetalRenderPipeline::isClosed);
+		return java.util.List.copyOf(this.pipelines);
+	}
+
 	@Override
 	public BackendRenderPipeline.Pending compilePipeline(final BackendRenderPipeline.CreateInfo pipelineCreateInfo) {
 		// Runs on the frontend's compile executor: SPIR-V -> MSL -> MTLRenderPipelineState all happen off the render thread.
 		MetalRenderPipeline pipeline = MetalRenderPipeline.compile(this, pipelineCreateInfo);
+		if (pipeline != null) {
+			this.pipelines.add(pipeline);
+		}
 		return () -> pipeline;
 	}
 

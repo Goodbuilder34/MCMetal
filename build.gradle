@@ -41,6 +41,10 @@ loom {
 			if (project.hasProperty("pitch")) {
 				vmArgs "-Dmcmetal.benchmark.pitch=${project.findProperty("pitch")}"
 			}
+			// -Pprops="key=value,key2=value2" passes extra system properties (e.g. mcmetal.pack.debug=colortex0).
+			if (project.hasProperty("props")) {
+				project.findProperty("props").toString().split(",").each { vmArgs "-D" + it.trim() }
+			}
 			if (project.hasProperty("scale")) {
 				vmArgs "-Dmcmetal.renderScale=${project.findProperty("scale")}"
 			}
@@ -71,7 +75,7 @@ def buildNative = tasks.register("buildNative", Exec) {
 		"-arch", "arm64", "-mmacosx-version-min=15.0",
 		"-Wall", "-Wextra", "-Wno-unused-parameter", "-Werror",
 		"-dynamiclib", "-install_name", "@rpath/libmcmetal.dylib",
-		"-framework", "Metal", "-framework", "QuartzCore", "-framework", "Foundation", "-framework", "CoreVideo", "-framework", "AppKit",
+		"-framework", "Metal", "-framework", "QuartzCore", "-framework", "Foundation", "-framework", "CoreVideo", "-framework", "AppKit", "-framework", "MetalFX",
 		*sources, "-o", output.absolutePath
 }
 
@@ -94,4 +98,30 @@ tasks.withType(JavaCompile).configureEach {
 java {
 	sourceCompatibility = JavaVersion.VERSION_25
 	targetCompatibility = JavaVersion.VERSION_25
+}
+
+jar {
+	def baseName = project.archives_base_name
+	from("LICENSE") {
+		rename { "${it}_${baseName}" }
+	}
+}
+
+// Dev check: compiles every program of a shaderpack to MSL without starting the game.
+// ./gradlew packCompileTest --args="run/shaderpacks/BSL_v10.1.8.zip [dumpDir]"
+// -Pmetalvalidation enables Metal's API and shader validation layers for the run tasks (errors go to stderr).
+tasks.withType(JavaExec).configureEach {
+	if (project.hasProperty("metalvalidation")) {
+		environment "MTL_DEBUG_LAYER", "1"
+		environment "MTL_SHADER_VALIDATION", "1"
+		environment "MTL_DEBUG_LAYER_ERROR_MODE", "nslog"
+	}
+}
+
+tasks.register("packCompileTest", JavaExec) {
+	dependsOn "classes"
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "com.mcmetal.shaderpack.dev.PackCompileTest"
+	workingDir = projectDir
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
 }

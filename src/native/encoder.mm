@@ -93,7 +93,7 @@ id<MTLBlitCommandEncoder> blit_encoder(McmContext *ctx) {
 	if (!ctx->blit) {
 		flush_clears(ctx);
 		@autoreleasepool {
-			ctx->blit = [command_buffer(ctx) blitCommandEncoder];
+			ctx->blit = timing_blit_encoder(ctx, command_buffer(ctx));
 		}
 	}
 	return ctx->blit;

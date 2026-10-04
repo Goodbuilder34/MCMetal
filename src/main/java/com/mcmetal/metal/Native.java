@@ -22,7 +22,7 @@ import java.security.MessageDigest;
  */
 public final class Native {
 	private static final String LIBRARY_RESOURCE = "/natives/macos-arm64/libmcmetal.dylib";
-	private static final int ABI_VERSION = 3;
+	private static final int ABI_VERSION = 4;
 
 	public static final int PUSH_CONSTANT_BUFFER_INDEX = 16;
 	public static final int MAX_UNIFORMS = PUSH_CONSTANT_BUFFER_INDEX;
@@ -132,6 +132,13 @@ public final class Native {
 		static final MethodHandle surfaceSetLimiter = blockingBinder.bind("mcm_surface_set_limiter", FunctionDescriptor.ofVoid(J, I));
 		// Sleeps when the frame limiter is on, so it must not be a critical (GC-blocking) call.
 		static final MethodHandle frameBegin = blockingBinder.bind("mcm_frame_begin", FunctionDescriptor.ofVoid(J, J));
+		static final MethodHandle passSetStageBytes = fastBinder.bind("mcm_pass_set_stage_bytes", FunctionDescriptor.ofVoid(J, I, I, J, I));
+		static final MethodHandle passSuspend = fastBinder.bind("mcm_pass_suspend", FunctionDescriptor.ofVoid(J));
+		static final MethodHandle generateMipmaps = fastBinder.bind("mcm_generate_mipmaps", FunctionDescriptor.ofVoid(J, J));
+		static final MethodHandle upscaleSupported = fastBinder.bind("mcm_upscale_supported", FunctionDescriptor.of(I, J));
+		static final MethodHandle upscale = blockingBinder.bind("mcm_upscale", FunctionDescriptor.of(I, J, J, J));
+		static final MethodHandle fxWorld = fastBinder.bind("mcm_fx_world", FunctionDescriptor.of(I, J, J, J, J, I));
+		static final MethodHandle fxFinal = fastBinder.bind("mcm_fx_final", FunctionDescriptor.of(I, J, J, J, I));
 	}
 
 	private static Path extractLibrary() throws IOException {
@@ -591,6 +598,62 @@ public final class Native {
 	public static void surfaceDestroy(long surface) {
 		try {
 			H.surfaceDestroy.invokeExact(surface);
+		} catch (Throwable t) {
+			throw rethrow(t);
+		}
+	}
+
+	public static boolean fxWorld(long context, long color, long depth, long params, int flags) {
+		try {
+			return (int) H.fxWorld.invokeExact(context, color, depth, params, flags) != 0;
+		} catch (Throwable t) {
+			throw rethrow(t);
+		}
+	}
+
+	public static boolean fxFinal(long context, long color, long params, int flags) {
+		try {
+			return (int) H.fxFinal.invokeExact(context, color, params, flags) != 0;
+		} catch (Throwable t) {
+			throw rethrow(t);
+		}
+	}
+
+	public static void passSetStageBytes(long context, int stages, int index, long data, int length) {
+		try {
+			H.passSetStageBytes.invokeExact(context, stages, index, data, length);
+		} catch (Throwable t) {
+			throw rethrow(t);
+		}
+	}
+
+	public static void passSuspend(long context) {
+		try {
+			H.passSuspend.invokeExact(context);
+		} catch (Throwable t) {
+			throw rethrow(t);
+		}
+	}
+
+	public static void generateMipmaps(long context, long texture) {
+		try {
+			H.generateMipmaps.invokeExact(context, texture);
+		} catch (Throwable t) {
+			throw rethrow(t);
+		}
+	}
+
+	public static boolean upscaleSupported(long context) {
+		try {
+			return (int) H.upscaleSupported.invokeExact(context) != 0;
+		} catch (Throwable t) {
+			throw rethrow(t);
+		}
+	}
+
+	public static boolean upscale(long context, long source, long destination) {
+		try {
+			return (int) H.upscale.invokeExact(context, source, destination) != 0;
 		} catch (Throwable t) {
 			throw rethrow(t);
 		}

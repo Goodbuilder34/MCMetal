@@ -11,11 +11,14 @@ static id<MTLTexture> base_texture(id<MTLTexture> texture, NSUInteger *level) {
 	return texture;
 }
 
+// Clear flags per color attachment: 0 loads, 1 clears, 2 overwrites every pixel (contents don't need loading).
+enum { MCM_LOAD = 0, MCM_CLEAR = 1, MCM_DONT_CARE = 2 };
+
 // True if the lingering encoder already has exactly these attachments and the new pass loads (not clears) them.
 static bool can_merge(McmContext *ctx, void *const *color_textures, const int32_t *clear_flags, int32_t color_count, void *depth_texture, int32_t clear_depth) {
 	if (!ctx->render || !ctx->lingering || ctx->pendingCount > 0 || clear_depth || color_count != ctx->passColorCount) return false;
 	for (int32_t i = 0; i < color_count; i++) {
-		if (clear_flags[i]) return false;
+		if (clear_flags[i] == MCM_CLEAR) return false;
 		NSUInteger level = 0;
 		id<MTLTexture> base = color_textures[i] ? base_texture((__bridge id<MTLTexture>)color_textures[i], &level) : nil;
 		if (base != ctx->passColors[i] || (base && level != ctx->passColorLevels[i])) return false;
@@ -62,11 +65,11 @@ static bool merge_with_clears(McmContext *ctx, void *const *color_textures, cons
 	};
 	int pendingColor = colorBase ? find_pending(colorBase, colorLevel) : -1;
 	int pendingDepth = depthBase ? find_pending(depthBase, depthLevel) : -1;
-	bool clearColor = colorBase && (clear_flags[0] || pendingColor >= 0);
+	bool clearColor = colorBase && (clear_flags[0] == MCM_CLEAR || pendingColor >= 0);
 	bool clearDepthNow = depthBase && (clear_depth || pendingDepth >= 0);
 	MTLClearColor color = MTLClearColorMake(0, 0, 0, 0);
 	if (clearColor) {
-		color = clear_flags[0] ? MTLClearColorMake(clear_colors[0], clear_colors[1], clear_colors[2], clear_colors[3]) : ctx->pending[pendingColor].color;
+		color = clear_flags[0] == MCM_CLEAR ? MTLClearColorMake(clear_colors[0], clear_colors[1], clear_colors[2], clear_colors[3]) : ctx->pending[pendingColor].color;
 	}
 	double depthValue = clear_depth || pendingDepth < 0 ? depth : ctx->pending[pendingDepth].depth;
 
@@ -146,6 +149,7 @@ extern "C" void mcm_begin_pass(void *handle, void *const *color_textures, const 
 		return;
 	}
 	end_render(ctx);
+	static const bool dontCare = getenv("MCMETAL_NO_DONTCARE_LOAD") == nullptr;
 	@autoreleasepool {
 		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
 		int32_t passWidth = 0, passHeight = 0;
@@ -156,10 +160,15 @@ extern "C" void mcm_begin_pass(void *handle, void *const *color_textures, const 
 			MTLRenderPassColorAttachmentDescriptor *attachment = pass.colorAttachments[(NSUInteger)i];
 			attachment.texture = texture;
 			attachment.storeAction = MTLStoreActionStore;
-			if (clear_flags[i]) {
+			if (clear_flags[i] == MCM_CLEAR) {
 				attachment.loadAction = MTLLoadActionClear;
 				const float *c = clear_colors + i * 4;
 				attachment.clearColor = MTLClearColorMake(c[0], c[1], c[2], c[3]);
+			} else if (clear_flags[i] == MCM_DONT_CARE && dontCare) {
+				// Every pixel is overwritten: skip reading the old contents into tile memory, and drop any
+				// deferred clear of this texture since nothing would see it.
+				take_clear(ctx, texture, &absorbed);
+				attachment.loadAction = MTLLoadActionDontCare;
 			} else if (take_clear(ctx, texture, &absorbed)) {
 				attachment.loadAction = MTLLoadActionClear;
 				attachment.clearColor = absorbed.color;
@@ -196,6 +205,7 @@ extern "C" void mcm_begin_pass(void *handle, void *const *color_textures, const 
 		// Clears this pass didn't absorb may target textures it samples, so they must land first.
 		flush_clears(ctx);
 
+		timing_render(ctx, pass, label);
 		id<MTLRenderCommandEncoder> encoder = [command_buffer(ctx) renderCommandEncoderWithDescriptor:pass];
 		if (label) encoder.label = [NSString stringWithUTF8String:label];
 		[encoder setViewport:(MTLViewport){0.0, 0.0, (double)passWidth, (double)passHeight, 0.0, 1.0}];
@@ -470,4 +480,30 @@ extern "C" void mcm_pop_debug_group(void *handle) {
 	} else if (ctx->commandBuffer) {
 		[ctx->commandBuffer popDebugGroup];
 	}
+}
+
+// Shaderpack support -------------------------------------------------------------------------
+
+// Like mcm_pass_set_bytes, but for one stage (bit 0 vertex, bit 1 fragment): pack programs have a separate default
+// uniform block per stage at the same index.
+extern "C" void mcm_pass_set_stage_bytes(void *handle, int32_t stages, int32_t index, const void *data, int32_t length) {
+	McmContext *ctx = (McmContext *)handle;
+	if (!ctx->render || length <= 0) return;
+	if (stages & 1) [ctx->render setVertexBytes:data length:(NSUInteger)length atIndex:(NSUInteger)index];
+	if (stages & 2) [ctx->render setFragmentBytes:data length:(NSUInteger)length atIndex:(NSUInteger)index];
+}
+
+// Ends the open render pass (if any) so other work can be encoded; the caller begins a new pass to continue.
+extern "C" void mcm_pass_suspend(void *handle) {
+	McmContext *ctx = (McmContext *)handle;
+	end_blit(ctx);
+	end_render(ctx);
+	flush_clears(ctx);
+}
+
+extern "C" void mcm_generate_mipmaps(void *handle, void *texture) {
+	McmContext *ctx = (McmContext *)handle;
+	id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
+	if (tex.mipmapLevelCount < 2) return;
+	[blit_encoder(ctx) generateMipmapsForTexture:tex];
 }

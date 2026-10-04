@@ -110,6 +110,9 @@ struct McmFrameStats {
 	}
 };
 
+struct McmFx;
+struct McmSurface;
+
 struct McmContext {
 	id<MTLDevice> device;
 	id<MTLCommandQueue> queue;
@@ -187,6 +190,9 @@ struct McmContext {
 	// present, never the next frame.
 	id<MTLCommandQueue> presentQueue;
 	id<CAMetalDrawable> pendingDrawable;
+	// Deferred presentation: the image this frame copied into its surface's ring, handed over at submit.
+	McmSurface *stagedSurface = nullptr;
+	int stagedSlot = -1;
 
 	// Deferred clears: folded into the next render pass's load action when it targets the same image,
 	// which saves a full store + reload of the attachment on a tile-based GPU.
@@ -199,6 +205,9 @@ struct McmContext {
 	};
 	PendingClear pending[16];
 	int pendingCount = 0;
+
+	// Shader layer (effects.mm): created at device creation, compiled in the background.
+	McmFx *fx = nullptr;
 };
 
 struct McmSurface {
@@ -243,6 +252,23 @@ struct McmSurface {
 	bool limiter = false;
 	bool vsyncRequested = true;  // what the game asked for
 	double lastTarget = 0.0;
+
+	// Deferred presentation (vsync off, no limiter). A drawable is only taken once a frame's image is finished:
+	// each frame copies its image into a ring slot, and the fetcher thread draws the newest one into whichever
+	// drawable the compositor frees next. Holding a drawable for the whole time a frame spends queued on the GPU
+	// would exhaust the three drawables and drop frames that were already rendered.
+	struct Image {
+		id<MTLTexture> texture;
+		uint64_t readUntil = 0;  // presentEvent value after which no present reads this slot
+	};
+	Image ring[3];
+	int ringNext = 0;
+	int pendingSlot = -1;       // newest finished image not yet presented
+	uint64_t pendingFrame = 0;  // its frame's submit value (ctx->event)
+	double pendingFrameStart = 0.0;
+	int32_t pendingWidth = 0, pendingHeight = 0;
+	id<MTLSharedEvent> presentEvent;
+	uint64_t presentCount = 0;
 };
 
 inline void use_buffer(McmContext *ctx, void *buffer) {
@@ -267,5 +293,15 @@ void clear_texture_now(McmContext *ctx, id<MTLTexture> tex, NSUInteger mip, NSUI
 void flush_clears(McmContext *ctx);
 bool take_clear(McmContext *ctx, id<MTLTexture> attachment, McmContext::PendingClear *out);
 
+// timing.mm (MCMETAL_PASS_TIMING=1)
+void timing_render(McmContext *ctx, MTLRenderPassDescriptor *pass, const char *label);
+id<MTLBlitCommandEncoder> timing_blit_encoder(McmContext *ctx, id<MTLCommandBuffer> buffer);
+id<MTLComputeCommandEncoder> timing_compute_encoder(McmContext *ctx, id<MTLCommandBuffer> buffer, const char *label);
+void timing_submit(McmContext *ctx, id<MTLCommandBuffer> buffer);
+
 // surface.mm
 void present_pending(McmContext *ctx, uint64_t frame);
+
+// effects.mm
+void fx_warm_up(McmContext *ctx);
+void fx_destroy(McmContext *ctx);

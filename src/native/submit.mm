@@ -22,6 +22,7 @@ extern "C" uint64_t mcm_submit(void *handle) {
 			}];
 		}
 		ctx->submitted++;
+		timing_submit(ctx, buffer);
 		[buffer encodeSignalEvent:ctx->event value:ctx->submitted];
 		[buffer commit];
 		ctx->commandBuffer = nil;

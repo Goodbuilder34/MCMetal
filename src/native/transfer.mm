@@ -105,6 +105,7 @@ void clear_texture_now(McmContext *ctx, id<MTLTexture> tex, NSUInteger mip, NSUI
 			pass.colorAttachments[0].storeAction = MTLStoreActionStore;
 			pass.colorAttachments[0].clearColor = color;
 		}
+		timing_render(ctx, pass, "clear");
 		id<MTLRenderCommandEncoder> encoder = [command_buffer(ctx) renderCommandEncoderWithDescriptor:pass];
 		[encoder endEncoding];
 	}
@@ -209,6 +210,7 @@ extern "C" void mcm_clear_region(void *handle, void *color_texture, void *depth_
 		NSUInteger sw = std::min<NSUInteger>((NSUInteger)std::max(width, 0), targetWidth - sx);
 		NSUInteger sh = std::min<NSUInteger>((NSUInteger)std::max(height, 0), targetHeight - sy);
 
+		timing_render(ctx, pass, "clear region");
 		id<MTLRenderCommandEncoder> encoder = [command_buffer(ctx) renderCommandEncoderWithDescriptor:pass];
 		if (sw > 0 && sh > 0) {
 			float clearColor[4] = {r, g, b, a};

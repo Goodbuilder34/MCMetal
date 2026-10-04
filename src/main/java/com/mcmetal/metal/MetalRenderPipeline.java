@@ -17,21 +17,63 @@ public final class MetalRenderPipeline implements BackendRenderPipeline {
 	private final long handle;
 	private final List<BindGroupLayout.UniformDescription> uniforms;
 	private final int[] stageMasks;
+	private final String name;
+	private BackendRenderPipeline.@Nullable CreateInfo createInfo;
+	private @Nullable Object pack;
+	/** Buffer index where a pack pipeline's vertex stage reads vertex buffer 0 directly, or -1. */
+	private int vertexPullSlot = -1;
 	private boolean closed;
 
-	private MetalRenderPipeline(final MetalDevice device, final long handle, final List<BindGroupLayout.UniformDescription> uniforms, final int[] stageMasks) {
+	private MetalRenderPipeline(final MetalDevice device, final long handle, final List<BindGroupLayout.UniformDescription> uniforms, final int[] stageMasks,
+		final String name) {
 		this.device = device;
 		this.handle = handle;
 		this.uniforms = uniforms;
 		this.stageMasks = stageMasks;
+		this.name = name;
+	}
+
+	/** A pipeline built by the shaderpack runtime: the game's uniform layout, with the pack's shaders. */
+	public static MetalRenderPipeline createPack(final MetalDevice device, final long handle, final List<BindGroupLayout.UniformDescription> uniforms,
+		final int[] stageMasks, final String name, final Object pack) {
+		MetalRenderPipeline pipeline = new MetalRenderPipeline(device, handle, uniforms, stageMasks, name);
+		pipeline.pack = pack;
+		return pipeline;
+	}
+
+	public void setVertexPullSlot(final int slot) {
+		this.vertexPullSlot = slot;
+	}
+
+	int vertexPullSlot() {
+		return this.vertexPullSlot;
 	}
 
 	long handle() {
 		return this.handle;
 	}
 
-	List<BindGroupLayout.UniformDescription> uniforms() {
+	public long nativeHandle() {
+		return this.handle;
+	}
+
+	public List<BindGroupLayout.UniformDescription> uniforms() {
 		return this.uniforms;
+	}
+
+	/** The game pipeline's name, e.g. "minecraft:pipeline/solid_terrain". */
+	public String name() {
+		return this.name;
+	}
+
+	/** How the game created this pipeline (null for pack pipelines). */
+	public BackendRenderPipeline.@Nullable CreateInfo createInfo() {
+		return this.createInfo;
+	}
+
+	/** The shaderpack runtime's data for a pack pipeline. */
+	public @Nullable Object pack() {
+		return this.pack;
 	}
 
 	/** Per uniform: bit 0 = used by the vertex stage, bit 1 = used by the fragment stage. */
@@ -118,7 +160,9 @@ public final class MetalRenderPipeline implements BackendRenderPipeline {
 			}
 
 			long handle = Native.pipelineCreate(device.context(), vertexFunction, fragmentFunction, encodeDescriptor(info), info.name());
-			return new MetalRenderPipeline(device, handle, uniforms, stageMasks);
+			MetalRenderPipeline pipeline = new MetalRenderPipeline(device, handle, uniforms, stageMasks, info.name());
+			pipeline.createInfo = info;
+			return pipeline;
 		} catch (RuntimeException e) {
 			MCMetal.LOGGER.error("Couldn't compile Metal pipeline {}", info.name(), e);
 			return null;
@@ -132,7 +176,7 @@ public final class MetalRenderPipeline implements BackendRenderPipeline {
 	}
 
 	/** See mcm_pipeline_create in src/native/mcmetal.mm for the layout. */
-	private static int[] encodeDescriptor(final BackendRenderPipeline.CreateInfo info) {
+	static int[] encodeDescriptor(final BackendRenderPipeline.CreateInfo info) {
 		IntArrayList d = new IntArrayList(64);
 		List<@Nullable ColorTargetState> colors = info.colorTargetStates();
 		DepthStencilState depth = info.depthStencilState();

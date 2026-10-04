@@ -27,6 +27,7 @@ public final class Benchmark {
 	private static int count;
 	private static long lastFrame;
 	private static long warmupStart;
+	private static int screenFrames;
 	private static long measureStart;
 	private static boolean done;
 	/** Saves screenshots/{name}.png right after measuring, to check the image (e.g. against another backend). */
@@ -42,6 +43,12 @@ public final class Benchmark {
 
 	public static void onFrameEnd(final Minecraft minecraft) {
 		if (done) {
+			// -Dmcmetal.benchmark.screen=packs|options[:SCREEN]: open a menu, let it draw, then take the screenshot.
+			if (screenFrames > 0 && --screenFrames == 0) {
+				Screenshot.grab(minecraft.gameDirectory, SCREENSHOT + ".png", minecraft.gameRenderer.mainRenderTarget(), 1, message -> {});
+				stopCountdown = 30;
+				return;
+			}
 			// Give the screenshot readback a few frames to complete before quitting.
 			if (stopCountdown > 0 && --stopCountdown == 0) {
 				minecraft.stop();
@@ -71,6 +78,12 @@ public final class Benchmark {
 			if (server != null) {
 				// No mobs: the test player can't be killed (or distracted) mid-run.
 				server.execute(() -> server.setDifficulty(Difficulty.PEACEFUL, true));
+				// -Dmcmetal.benchmark.time=<ticks>: a fixed time of day, for comparable screenshots.
+				Long time = Long.getLong("mcmetal.benchmark.time");
+				if (time != null) {
+					server.execute(() -> server.overworld().dimensionType().defaultClock()
+						.ifPresent(clock -> server.clockManager().setTotalTicks(clock, time)));
+				}
 			}
 			warmupStart = now;
 			MCMetal.LOGGER.info("[bench] world ready, warming up for {}s", WARMUP_SECONDS);
@@ -97,8 +110,20 @@ public final class Benchmark {
 		if (now - measureStart >= SECONDS * 1_000_000_000L) {
 			done = true;
 			report(minecraft);
+			String screen = System.getProperty("mcmetal.benchmark.screen", "");
 			if (SCREENSHOT.isEmpty()) {
 				minecraft.stop();
+			} else if (!screen.isEmpty()) {
+				com.mcmetal.shaderpack.ui.ShaderPackScreen packs = new com.mcmetal.shaderpack.ui.ShaderPackScreen(null);
+				minecraft.gui.setScreen(packs);
+				String selected = com.mcmetal.shaderpack.PackManager.selected();
+				if (screen.startsWith("options") && selected != null) {
+					com.mcmetal.shaderpack.ui.ShaderOptionsScreen.open(packs, selected);
+					if (screen.contains(":")) {
+						com.mcmetal.shaderpack.ui.ShaderOptionsScreen.openSub(minecraft.gui.screen(), screen.substring(screen.indexOf(':') + 1));
+					}
+				}
+				screenFrames = 20;
 			} else {
 				Screenshot.grab(minecraft.gameDirectory, SCREENSHOT + ".png", minecraft.gameRenderer.mainRenderTarget(), 1, message -> {});
 				stopCountdown = 30;

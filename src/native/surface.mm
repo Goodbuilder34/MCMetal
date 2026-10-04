@@ -111,15 +111,131 @@ extern "C" void *mcm_surface_create(void *handle, void *metal_layer) {
 	McmSurface *surface = new McmSurface();
 	surface->layer = layer;
 	surface->ctx = ctx;
+	surface->presentEvent = [ctx->device newSharedEvent];
 	return surface;
+}
+
+static const bool DEFERRED_PRESENT = getenv("MCMETAL_NO_DEFERRED_PRESENT") == nullptr;
+
+// Caller holds surface->lock, or is the render thread (the only writer of vsync and limiter).
+static bool deferred_mode(McmSurface *surface) {
+	return DEFERRED_PRESENT && !surface->vsync && !surface->limiter;
+}
+
+// Fetcher thread, deferred mode: waits for a free drawable and presents the newest finished image into it.
+static void present_latest(McmSurface *surface) {
+	McmContext *ctx = surface->ctx;
+	@autoreleasepool {
+		id<CAMetalDrawable> drawable = [surface->layer nextDrawable];
+		id<MTLTexture> image = nil;
+		uint64_t frame = 0, value = 0;
+		double frameStart = 0.0;
+		int32_t width = 0, height = 0;
+		{
+			std::lock_guard<std::mutex> guard(surface->lock);
+			if (surface->stopping || surface->pendingSlot < 0) return;  // the drawable just goes back unused
+			int slot = surface->pendingSlot;
+			surface->pendingSlot = -1;
+			image = surface->ring[slot].texture;
+			frame = surface->pendingFrame;
+			frameStart = surface->pendingFrameStart;
+			width = surface->pendingWidth;
+			height = surface->pendingHeight;
+			value = ++surface->presentCount;
+			surface->ring[slot].readUntil = value;
+		}
+		id<MTLCommandBuffer> buffer = [ctx->presentQueue commandBuffer];
+		buffer.label = @"Present";
+		[buffer encodeWaitForEvent:ctx->event value:frame];
+		bool fits = drawable && image && width > 0 && height > 0;
+		if (fits) {
+			bool covers = (NSUInteger)width >= drawable.texture.width && (NSUInteger)height >= drawable.texture.height;
+			MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+			pass.colorAttachments[0].texture = drawable.texture;
+			pass.colorAttachments[0].loadAction = covers ? MTLLoadActionDontCare : MTLLoadActionClear;
+			pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+			pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+			id<MTLRenderCommandEncoder> encoder = [buffer renderCommandEncoderWithDescriptor:pass];
+			encoder.label = @"Present";
+			uint32_t size[2] = {(uint32_t)width, (uint32_t)height};
+			[encoder setRenderPipelineState:ctx->presentPipeline];
+			[encoder setViewport:(MTLViewport){0.0, 0.0, (double)width, (double)height, 0.0, 1.0}];
+			[encoder setFragmentTexture:image atIndex:0];
+			[encoder setFragmentBytes:size length:sizeof(size) atIndex:0];
+			[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			[encoder endEncoding];
+			std::shared_ptr<std::atomic<uint64_t>> shown = ctx->presentsShown;
+			std::shared_ptr<McmFrameStats> stats = ctx->frameStats;
+			[drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+				double when = presented.presentedTime;
+				if (when <= 0) return;
+				shown->fetch_add(1, std::memory_order_relaxed);
+				if (frameStart > 0 && when > frameStart) {
+					stats->latencyNs.fetch_add((uint64_t)((when - frameStart) * 1e9), std::memory_order_relaxed);
+					stats->latencyCount.fetch_add(1, std::memory_order_relaxed);
+				}
+			}];
+		}
+		static const bool debug = getenv("MCMETAL_PACE_DEBUG") != nullptr;
+		if (debug) mcm_log("deferred present frame=%llu value=%llu fits=%d drawable=%dx%d image=%dx%d", (unsigned long long)frame, (unsigned long long)value, fits,
+			drawable ? (int)drawable.texture.width : -1, drawable ? (int)drawable.texture.height : -1, width, height);
+		// Always signalled, so a frame waiting to reuse the slot is released even when nothing was drawn.
+		[buffer encodeSignalEvent:surface->presentEvent value:value];
+		if (fits) [buffer presentDrawable:drawable];
+		[buffer commit];
+	}
+}
+
+// Render thread, deferred mode: copies the frame's image into the next ring slot; present_pending publishes it.
+static int32_t stage_image(McmSurface *surface, McmContext *ctx, id<MTLTexture> source, int32_t mip, int32_t width, int32_t height) {
+	int slot;
+	uint64_t waitValue;
+	id<MTLTexture> target;
+	{
+		std::lock_guard<std::mutex> guard(surface->lock);
+		slot = surface->ringNext;
+		surface->ringNext = (slot + 1) % 3;
+		if (surface->pendingSlot == slot) surface->pendingSlot = -1;
+		McmSurface::Image &image = surface->ring[slot];
+		waitValue = image.readUntil;
+		image.readUntil = 0;
+		if (!image.texture || (int32_t)image.texture.width != width || (int32_t)image.texture.height != height
+		    || image.texture.pixelFormat != source.pixelFormat) {
+			MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat width:(NSUInteger)width
+			                                                                              height:(NSUInteger)height mipmapped:NO];
+			desc.storageMode = MTLStorageModePrivate;
+			desc.usage = MTLTextureUsageShaderRead;
+			image.texture = [ctx->device newTextureWithDescriptor:desc];
+			image.texture.label = @"Present image";
+		}
+		target = image.texture;
+	}
+	if (!target) return 0;
+	// A present may still be reading this slot (from three frames ago); the copy waits for it on the GPU.
+	if (waitValue > 0) [command_buffer(ctx) encodeWaitForEvent:surface->presentEvent value:waitValue];
+	id<MTLBlitCommandEncoder> blit = blit_encoder(ctx);
+	[blit copyFromTexture:source sourceSlice:0 sourceLevel:(NSUInteger)mip sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake((NSUInteger)width, (NSUInteger)height, 1)
+	            toTexture:target destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+	end_blit(ctx);
+	ctx->stagedSurface = surface;
+	ctx->stagedSlot = slot;
+	return 1;
 }
 
 static void fetcher_loop(McmSurface *surface) {
 	while (true) {
+		bool deferred;
 		{
 			std::unique_lock<std::mutex> guard(surface->lock);
-			surface->wake.wait(guard, [surface] { return surface->stopping || (!surface->parked && !surface->vsync); });
+			surface->wake.wait(guard, [surface] {
+				return surface->stopping || (deferred_mode(surface) ? surface->pendingSlot >= 0 : (!surface->parked && !surface->vsync));
+			});
 			if (surface->stopping) return;
+			deferred = deferred_mode(surface);
+		}
+		if (deferred) {
+			present_latest(surface);
+			continue;
 		}
 		@autoreleasepool {
 			id<CAMetalDrawable> drawable = [surface->layer nextDrawable];
@@ -139,6 +255,7 @@ static void apply_sync_locked(McmSurface *surface) {
 	surface->layer.displaySyncEnabled = sync;
 	if (sync && !surface->vsync) surface->parked = nil;  // the synced path acquires drawables itself
 	surface->vsync = sync;
+	if (deferred_mode(surface)) surface->parked = nil;  // deferred presents take drawables only when an image is ready
 	if (!surface->vsync && !surface->fetcherRunning) {
 		surface->fetcherRunning = true;
 		surface->fetcher = std::thread(fetcher_loop, surface);
@@ -203,7 +320,10 @@ static bool pace_frame(McmSurface *surface) {
 	double next = surface->presentedSlot + interval;
 	if (surface->presentedSlot == 0 || now > next + interval) next = now;  // first frame, or fell behind: rebase
 	// Present the last frame before the slot: the one after it would arrive late.
-	if (now + surface->frameTime < next) return false;
+	if (now + surface->frameTime < next) {
+		if (PACE_DEBUG) mcm_log("pace skip now=%.4f next=%.4f ft=%.2fms", now, next, surface->frameTime * 1000);
+		return false;
+	}
 	surface->presentedSlot = next;
 	if (PACE_DEBUG) mcm_log("pace present now=%.4f next=%.4f ft=%.2fms", now, next, surface->frameTime * 1000);
 	return true;
@@ -220,12 +340,16 @@ extern "C" int32_t mcm_surface_blit(void *handle, void *ctx_handle, void *textur
 	end_render(ctx);
 	flush_clears(ctx);
 	if (!ctx->presentPipeline || width <= 0 || height <= 0) return 0;
+	if (deferred_mode(surface)) return stage_image(surface, ctx, (__bridge id<MTLTexture>)texture, mip, width, height);
 	bool paced = !surface->vsync && surface->refreshInterval > 0;
 	// The limiter already renders exactly one frame per refresh; every one of them is presented.
 	if (!surface->vsync && !surface->limiter && !pace_frame(surface)) return 0;
 	@autoreleasepool {
 		id<CAMetalDrawable> drawable = take_drawable(surface);
-		if (!drawable) return 0;
+		if (!drawable) {
+			if (PACE_DEBUG) mcm_log("pace no drawable");
+			return 0;
+		}
 		std::shared_ptr<std::atomic<uint64_t>> shown = ctx->presentsShown;
 		std::shared_ptr<McmSurface::Pacing> pacing = surface->pacing;
 		double interval = surface->refreshInterval;
@@ -302,6 +426,7 @@ extern "C" int32_t mcm_surface_blit(void *handle, void *ctx_handle, void *textur
 		pass.colorAttachments[0].loadAction = covers ? MTLLoadActionDontCare : MTLLoadActionClear;
 		pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
 		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+		timing_render(ctx, pass, "present");
 		id<MTLRenderCommandEncoder> encoder = [command_buffer(ctx) renderCommandEncoderWithDescriptor:pass];
 		encoder.label = @"Present";
 		[encoder setRenderPipelineState:ctx->presentPipeline];
@@ -317,6 +442,20 @@ extern "C" int32_t mcm_surface_blit(void *handle, void *ctx_handle, void *textur
 
 // Presents the drawable written by the frame that was just committed as `frame`.
 void present_pending(McmContext *ctx, uint64_t frame) {
+	if (McmSurface *surface = ctx->stagedSurface) {
+		ctx->stagedSurface = nullptr;
+		{
+			std::lock_guard<std::mutex> guard(surface->lock);
+			surface->pendingSlot = ctx->stagedSlot;
+			surface->pendingFrame = frame;
+			surface->pendingFrameStart = ctx->frameStart;
+			McmSurface::Image &image = surface->ring[ctx->stagedSlot];
+			surface->pendingWidth = image.texture ? (int32_t)image.texture.width : 0;
+			surface->pendingHeight = image.texture ? (int32_t)image.texture.height : 0;
+		}
+		surface->wake.notify_all();
+		return;
+	}
 	if (!ctx->pendingDrawable) return;
 	@autoreleasepool {
 		id<CAMetalDrawable> drawable = ctx->pendingDrawable;

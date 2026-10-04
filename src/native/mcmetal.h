@@ -72,6 +72,7 @@ MCM_EXPORT void mcm_blit_texture_to_texture(void *ctx, void *src, void *dst, int
 MCM_EXPORT void mcm_clear_texture(void *ctx, void *texture, int32_t mip, int32_t slice, float r, float g, float b, float a, double depth);
 MCM_EXPORT void mcm_clear_region(void *ctx, void *color_texture, void *depth_texture, int32_t mip, int32_t x, int32_t y, int32_t width, int32_t height, float r, float g, float b, float a, double depth);
 
+// clear_flags per color attachment: 0 load, 1 clear to clear_colors, 2 the pass overwrites every pixel (no load).
 MCM_EXPORT void mcm_begin_pass(void *ctx, void *const *color_textures, const int32_t *clear_flags, const float *clear_colors, int32_t color_count, void *depth_texture, int32_t clear_depth, double depth, int32_t x, int32_t y, int32_t width, int32_t height, const char *label);
 MCM_EXPORT void mcm_end_pass(void *ctx);
 MCM_EXPORT void mcm_pass_set_pipeline(void *ctx, void *pipeline);
@@ -108,6 +109,19 @@ MCM_EXPORT void mcm_surface_destroy(void *surface);
 MCM_EXPORT void mcm_surface_set_limiter(void *surface, int32_t enabled);
 // Marks the start of a frame (before input is read); sleeps here when the limiter is on. surface may be null.
 MCM_EXPORT void mcm_frame_begin(void *surface, void *ctx);
+
+// Shaderpack support (pass.mm).
+MCM_EXPORT void mcm_pass_set_stage_bytes(void *ctx, int32_t stages, int32_t index, const void *data, int32_t length);
+MCM_EXPORT void mcm_pass_suspend(void *ctx);
+MCM_EXPORT void mcm_generate_mipmaps(void *ctx, void *texture);
+// MetalFX spatial upscale of source into all of destination; returns 0 when unavailable.
+MCM_EXPORT int32_t mcm_upscale_supported(void *ctx);
+MCM_EXPORT int32_t mcm_upscale(void *ctx, void *source, void *destination);
+
+// Shader layer (effects.mm). params: the FxParams block (see ShaderLayer.java); flags: FX_* bits.
+// Both return 0 when nothing was drawn (shaders still compiling, or unsupported targets).
+MCM_EXPORT int32_t mcm_fx_world(void *ctx, void *color_texture, void *depth_texture, const float *params, int32_t flags);
+MCM_EXPORT int32_t mcm_fx_final(void *ctx, void *color_texture, const float *params, int32_t flags);
 
 #ifdef __cplusplus
 }
